@@ -11,7 +11,7 @@ Dates: today is Nov 4, 2026, **GTA 6 launches Nov 19**, and code freezes Nov 17.
 Turn one long gaming video into **5 ready-to-post vertical clips in under 15 minutes** on a normal laptop. Then get them onto TikTok and Instagram Reels with as little manual work as the platforms allow.
 
 The MVP is done when all of these hold:
-1. Paste a YouTube URL (or a local file) and get 5 clips: 1080x1920, 15–60s, burned-in subtitles, and a hook line on screen.
+1. Paste a YouTube URL and get 5 clips: 1080x1920, 15–60s, burned-in subtitles, and a hook line on screen.
 2. Every clip has a title, a caption, and hashtags.
 3. A human approves or rejects clips in a dashboard and can tweak the caption, hook, or trim.
 4. Approved clips are posted on a schedule: **Instagram fully automatic, TikTok as a draft in the app.**
@@ -22,7 +22,7 @@ The MVP is done when all of these hold:
 ### In scope (MVP, by Nov 12)
 | Area | What we do |
 |---|---|
-| Input | YouTube URL, local video file. One video per job, ≤ 90 min. |
+| Input | YouTube URL. One video per job, ≤ 90 min. |
 | Highlight detection | Audio loudness, scene cuts, and speech reactions give candidate moments. Claude picks the final clips and sets their start and end. |
 | Render | 9:16 blurred-background layout, word-by-word subtitles, hook text for the first 3s, loudness normalized. |
 | Copy | Claude writes the hook, title, caption, and hashtags. A suggested trending sound comes from a hand-kept list. |
@@ -79,7 +79,7 @@ It runs as three local processes from one Python package, with no servers to dep
 Stage order: **ingest → analyze → captions → render**. Captions runs before render because the hook text gets burned into the video.
 
 ### 5.1 ingest (Dev A)
-- Input: a URL or a local path. Uses `yt-dlp -f "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]"` and merges to `source.mp4`.
+- Input: a YouTube URL. Uses `yt-dlp -f "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]"` and merges to `source.mp4`. H.264 comes first because plain `ext=mp4` can be AV1, which decodes slowly on laptops.
 - Writes to the manifest: `title`, `description`, `channel`, `credit`, `duration`, `source_file`. Rejects sources longer than `MAX_SOURCE_MINUTES`.
 - Also extracts `audio.wav` (16 kHz mono) once. Transcription and the loudness analysis both reuse it.
 
@@ -218,7 +218,7 @@ tests/             # pure-function tests + fixture manifests, no network
 | Risk | Mitigation |
 |---|---|
 | TikTok audit not done by launch | The inbox flow works without the audit. That's already the plan. |
-| YouTube blocks downloads | Cookies from the browser, `uv lock --upgrade-package yt-dlp`, local-file input |
+| YouTube blocks downloads | Cookies from the browser, `uv lock --upgrade-package yt-dlp` |
 | Whisper too slow | `base` model, CUDA if available, YouTube subtitles as a fallback |
 | Accounts flagged for reposting | Own or permitted sources, real changes to each clip, credit lines, a daily cap |
 | Double posts | UNIQUE constraint, a claim before upload, and `needs_check` instead of blind retries |

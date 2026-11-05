@@ -17,13 +17,13 @@ STAGES = ["ingest", "analyze", "captions", "render"]  # publish runs via the sch
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 
-def _run_stage(stage: str, job: Job, force: bool) -> Job:
+def _run_stage(stage: str, job: Job, force: bool, clip: str | None = None) -> Job:
     module = importlib.import_module(f"clipper.{stage}")
     if not hasattr(module, "run"):
         typer.echo(f"[skip] stage '{stage}' not implemented yet")
         return job
     try:
-        job = module.run(job, force=force)
+        job = module.run(job, force=force, **({"clip_id": clip} if clip else {}))
     except Exception as e:  # keep the manifest, record the failure
         job.status = JobStatus.failed
         job.error = f"{stage}: {e}"
@@ -51,11 +51,18 @@ def run(
 
 
 @app.command()
-def stage(name: str, job_id: str, force: bool = False) -> None:
+def stage(
+    name: str,
+    job_id: str,
+    force: bool = False,
+    clip: str = typer.Option(None, "--clip", help="Render only this clip id (render only)."),
+) -> None:
     """Run a single stage on an existing job."""
     if name not in STAGES:
         raise typer.BadParameter(f"stage must be one of {STAGES}")
-    _run_stage(name, Job.load(config.WORKSPACE, job_id), force)
+    if clip and name != "render":
+        raise typer.BadParameter("--clip only works with the render stage")
+    _run_stage(name, Job.load(config.WORKSPACE, job_id), force, clip)
 
 
 if __name__ == "__main__":

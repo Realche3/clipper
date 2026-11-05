@@ -33,13 +33,13 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 | A6 | Subtitles + hook overlay | `a/subtitles` | Nov 11 | A5 |
 | A7 | Speed + quality pass | `a/tuning` | Nov 13–16 | M1 |
 
-- [ ] **A1 Ingest** (`clipper/ingest`): yt-dlp download (≤1080p mp4) or copy a local file to `source.mp4`. Extract `audio.wav` (16 kHz mono). Fill in `title`, `description`, `channel`, `credit`, `duration` (from yt-dlp metadata). Reject sources longer than `MAX_SOURCE_MINUTES`. Support `YTDLP_COOKIES_FROM_BROWSER`.
+- [x] **A1 Ingest** (`clipper/ingest`): yt-dlp download (≤1080p mp4, H.264 preferred) to `source.mp4`. YouTube URLs only. Extract `audio.wav` (16 kHz mono). Fill in `title`, `description`, `channel`, `credit`, `duration` (from yt-dlp metadata). Reject sources longer than `MAX_SOURCE_MINUTES`. Support `YTDLP_COOKIES_FROM_BROWSER`.
   *Done when:* `clipper run <url> --until ingest` leaves `status=ingested`. A test uses a 5s video generated with ffmpeg `testsrc` (no network).
-- [ ] **A2 Transcribe** (`clipper/analyze/transcribe.py`): faster-whisper with word timestamps and VAD, saved to `transcript.json` as the `Transcript` model. Skip if the file exists, unless `--force`.
-- [ ] **A3 Signals + candidates** (`analyze/signals.py`, `analyze/candidates.py`): per-second loudness, cut density, and speech score, then combined score, peak picking, and windows snapped to pauses. **Pure functions with unit tests** on synthetic arrays.
-- [ ] **A4 Ranker** (`analyze/rank.py`): send the candidates to `clipper.llm.ask_json`. Claude returns the final `CLIPS_PER_VIDEO` clips with start, end, score, and reason. Fall back to the top N by score. Leaves `status=analyzed`.
-- [ ] **A5 Render** (`clipper/render`): ffmpeg cut, blur layout, loudnorm, and H.264 1080x1920 at 30fps. Writes `clips/<id>.mp4` and sets `clip.file`. Add `--clip <id>` to `clipper stage` (a small change to the shared `cli.py`, so tell Dev B). Leaves `status=rendered`.
-- [ ] **A6 Subtitles + hook** (`render/subtitles.py`): build the `.ass` file from words, 2–4 words per line with the current word highlighted. `hook_text` sits in the top third for 0–3s. Use the Windows `cwd=` trick. Pure ASS generator with unit tests.
+- [x] **A2 Transcribe** (`clipper/analyze/transcribe.py`): faster-whisper with word timestamps and VAD, saved to `transcript.json` as the `Transcript` model. Skip if the file exists, unless `--force`.
+- [x] **A3 Signals + candidates** (`analyze/signals.py`, `analyze/candidates.py`): per-second loudness, cut density, and speech score, then combined score, peak picking, and windows snapped to pauses. **Pure functions with unit tests** on synthetic arrays.
+- [x] **A4 Ranker** (`analyze/rank.py`): send the candidates to `clipper.llm.ask_json`. Claude returns the final `CLIPS_PER_VIDEO` clips with start, end, score, and reason. Fall back to the top N by score. Leaves `status=analyzed`.
+- [x] **A5 Render** (`clipper/render`): ffmpeg cut, blur layout, loudnorm, and H.264 1080x1920 at 30fps. Writes `clips/<id>.mp4` and sets `clip.file`. Add `--clip <id>` to `clipper stage` (a small change to the shared `cli.py`, so tell Dev B). Leaves `status=rendered`.
+- [x] **A6 Subtitles + hook** (`render/subtitles.py`): build the `.ass` file from words, 2–4 words per line with the current word highlighted. `hook_text` sits in the top third for 0–3s. Use the Windows `cwd=` trick. Pure ASS generator with unit tests.
 - [ ] **A7 Tuning:** a 20-min video must finish in ≤ 15 min (fall back to whisper `base` if not), check that clips start on the action, and tune the scoring weights.
 
 ---
