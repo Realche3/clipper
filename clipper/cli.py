@@ -69,6 +69,16 @@ def stage(
 
 
 @app.command()
+def resume(job_id: str) -> None:
+    """Re-run the pipeline on an existing (e.g. failed) job. Finished work is skipped."""
+    job = Job.load(config.WORKSPACE, job_id)
+    job.error = None
+    typer.echo(f"resuming job {job.id}")
+    for name in STAGES:
+        job = _run_stage(name, job, force=False)
+
+
+@app.command()
 def ui() -> None:
     """Open the dashboard in your browser."""
     import subprocess

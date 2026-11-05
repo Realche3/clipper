@@ -98,6 +98,12 @@ def page_jobs() -> None:
     job = row.job
     if job.status == JobStatus.failed:
         st.error(f"This job failed: {job.error}")
+        st.caption(
+            "Fix the cause (see the log), then retry. Finished steps are skipped, so nothing "
+            "is downloaded or transcribed twice."
+        )
+        if st.button("Retry job", type="primary", key=f"resume-{job_id}"):
+            _do(actions.resume_job, job_id, ok="Retrying")
         st.code(actions.log_tail(job_id, 40) or "(no log)", language=None)
         return
 
@@ -159,12 +165,38 @@ def clip_card(job_id: str, clip_id: str) -> None:
             if b3.button("Reject", key=f"no-{key}", disabled=clip.review == ReviewStatus.rejected):
                 _do(actions.reject, job_id, clip_id, ok="Rejected")
 
-            for post in actions.posts_for_clip(job_id, clip_id):
+            clip_posts = actions.posts_for_clip(job_id, clip_id)
+            for post in clip_posts:
                 st.caption(
                     f"{STATUS_ICON[post.status]} {actions.PLATFORM_LABEL[post.platform]}: "
                     f"{post.status.value} · {post.scheduled_at:%b %d %H:%M}"
                     + (f" · {post.error}" if post.error else "")
                 )
+
+            locked = any(p.status != PostStatus.scheduled for p in clip_posts)
+            with st.expander("✂️ Edit hook / trim (re-renders the clip)"):
+                if locked:
+                    st.caption("Already uploaded, so it can't be changed.")
+                hook = st.text_input(
+                    "Hook on screen (first 3s)", clip.hook_text or "", key=f"hook-{key}"
+                )
+                s_col, e_col = st.columns(2)
+                max_t = float(job.duration or clip.end + 60)
+                start = s_col.number_input(
+                    "Start (s)", 0.0, max_t, float(clip.start), 0.5, key=f"start-{key}"
+                )
+                end = e_col.number_input(
+                    "End (s)", 0.0, max_t, float(clip.end), 0.5, key=f"end-{key}"
+                )
+                st.caption(f"New length: {end - start:.1f}s")
+                edited = (
+                    hook.strip() != (clip.hook_text or "")
+                    or abs(start - clip.start) > 0.01
+                    or abs(end - clip.end) > 0.01
+                )
+                if st.button("Re-render", key=f"rerender-{key}", disabled=locked or not edited):
+                    with st.spinner("Re-rendering... (10-60s)"):
+                        _do(actions.edit_clip, job_id, clip_id, hook, start, end, ok="Re-rendered")
 
 
 def _do(fn, *args, ok: str) -> None:
@@ -204,19 +236,36 @@ def page_queue() -> None:
             if clip.suggested_sound:
                 st.markdown(f"🎵 Sound: **{clip.suggested_sound}**")
             st.code(post_text(job, clip, Platform.tiktok), language=None)  # has a copy button
+            url_col, btn_col = st.columns([3, 1])
+            url = url_col.text_input(
+                "TikTok link (optional)",
+                key=f"url-{p.id}",
+                placeholder="https://www.tiktok.com/@...",
+            )
+            if btn_col.button("Mark as posted", key=f"posted-{p.id}", type="primary"):
+                _do(actions.mark_posted, p.id, url, ok="Marked as posted")
 
     if problems:
         st.subheader(f"⚠️ Needs attention ({len(problems)})")
         for p in problems:
-            hint = (
-                "Check the account: it may or may not have posted."
-                if p.status == PostStatus.needs_check
-                else "Gave up after retries."
-            )
-            st.error(
-                f"{STATUS_ICON[p.status]} {actions.PLATFORM_LABEL[p.platform]} · "
-                f"{p.job_id}/{p.clip_id} · {p.error or ''}  \n{hint}"
-            )
+            with st.container(border=True):
+                where = f"{actions.PLATFORM_LABEL[p.platform]} · {p.job_id}/{p.clip_id}"
+                if p.status == PostStatus.needs_check:
+                    st.warning(
+                        f"⚠️ **{where}**: the upload was interrupted, so it may or may not "
+                        f"have posted. Check the account, then pick one.  \n{p.error or ''}"
+                    )
+                    c1, c2, c3 = st.columns(3)
+                    if c1.button("It's live", key=f"live-{p.id}"):
+                        _do(actions.mark_posted, p.id, None, ok="Marked as posted")
+                    if c2.button("It didn't post: retry", key=f"retry-{p.id}"):
+                        _do(actions.retry_post, p.id, ok="Rescheduled")
+                    if c3.button("Drop it", key=f"drop-{p.id}"):
+                        _do(actions.give_up_post, p.id, ok="Dropped")
+                else:
+                    st.error(f"❌ **{where}**: gave up after retries.  \n{p.error or ''}")
+                    if st.button("Try again", key=f"retry-{p.id}"):
+                        _do(actions.retry_post, p.id, ok="Rescheduled")
 
     st.subheader(f"🕒 Upcoming ({len(upcoming)})")
     for p in upcoming:
@@ -243,4 +292,6 @@ def page_queue() -> None:
 header()
 PAGES = {"New video": page_new, "Jobs": page_jobs, "Queue": page_queue}
 page = st.sidebar.radio("Page", list(PAGES), key="page")
+if problems := actions.problem_count():
+    st.sidebar.error(f"⚠️ {problems} post(s) need attention on the **Queue** page")
 PAGES[page]()

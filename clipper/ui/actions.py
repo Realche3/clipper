@@ -59,24 +59,44 @@ def submit_job(url: str, context: str | None = None) -> str:
     if not _URL.match(url):
         raise ActionError("Paste a full video link starting with https://")
     job_id = uuid.uuid4().hex[:8]
+    args = ["run", url, "--job-id", job_id]
+    if context and context.strip():
+        args += ["--context", context.strip()]
+    _spawn(job_id, args, append=False)
+    return job_id
+
+
+def resume_job(job_id: str) -> None:
+    """Retry a failed job in the background. Stages skip work that is already done."""
+    job = Job.load(config.WORKSPACE, job_id)
+    if job.status != JobStatus.failed:
+        raise ActionError("Only failed jobs can be retried.")
+    _spawn(job_id, ["resume", job_id], append=True)
+
+
+def _spawn(job_id: str, cli_args: list[str], *, append: bool) -> None:
     job_dir = Job.dir_for(config.WORKSPACE, job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
-
-    cmd = [sys.executable, "-m", "clipper.cli", "run", url, "--job-id", job_id]
-    if context and context.strip():
-        cmd += ["--context", context.strip()]
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}  # emoji in logs on Windows consoles
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    with open(job_dir / LOG_NAME, "w", encoding="utf-8") as log:
+    with open(job_dir / LOG_NAME, "a" if append else "w", encoding="utf-8") as log:
         subprocess.Popen(
-            cmd,
+            _cli(*cli_args),
             cwd=config.ROOT,
             stdout=log,
             stderr=subprocess.STDOUT,
-            env=env,
-            creationflags=flags,
+            env=_env(),
+            creationflags=_NO_WINDOW,
         )
-    return job_id
+
+
+def _cli(*args: str) -> list[str]:
+    return [sys.executable, "-m", "clipper.cli", *args]
+
+
+def _env() -> dict[str, str]:
+    return {**os.environ, "PYTHONIOENCODING": "utf-8"}  # emoji in logs on Windows consoles
+
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def list_jobs() -> list[JobRow]:
@@ -156,6 +176,61 @@ def approve(job_id: str, clip_id: str) -> list[Post]:
         conn.close()
 
 
+MIN_CLIP_SECONDS = 3.0  # platform minimum for Reels/TikTok
+MAX_CLIP_SECONDS = 180.0
+RENDER_TIMEOUT = 600
+_LOCKED_STATUSES = {
+    PostStatus.uploading,
+    PostStatus.uploaded_draft,
+    PostStatus.published,
+    PostStatus.needs_check,
+}
+
+
+def edit_clip(job_id: str, clip_id: str, hook_text: str, start: float, end: float) -> None:
+    """Change the hook and/or trim, then re-render just this clip (blocks ~10-60s).
+
+    Queued posts pick up the new file. Not allowed once the clip has started going out.
+    """
+    job = _editable(job_id)
+    clip = job.clip(clip_id)
+    if any(p.status in _LOCKED_STATUSES for p in posts_for_clip(job_id, clip_id)):
+        raise ActionError("This clip has already been uploaded; it can't be changed now.")
+    if start < 0 or end <= start:
+        raise ActionError("End must be after start.")
+    if job.duration and end > job.duration + 0.5:
+        raise ActionError(f"End is past the end of the video ({job.duration:.0f}s).")
+    if not MIN_CLIP_SECONDS <= end - start <= MAX_CLIP_SECONDS:
+        raise ActionError(
+            f"Clips must be {MIN_CLIP_SECONDS:.0f}-{MAX_CLIP_SECONDS:.0f}s long "
+            f"(this one is {end - start:.1f}s)."
+        )
+
+    clip.hook_text = hook_text.strip() or None
+    clip.start, clip.end = round(start, 2), round(end, 2)
+    job.save(config.WORKSPACE)
+
+    result = subprocess.run(
+        _cli("stage", "render", job_id, "--clip", clip_id, "--force"),
+        cwd=config.ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_env(),
+        creationflags=_NO_WINDOW,
+        timeout=RENDER_TIMEOUT,
+    )
+    if result.returncode != 0:
+        # The CLI marks the whole job failed; one bad re-render shouldn't block the others.
+        # The previous clip file is untouched (render writes to a temp file first).
+        job = Job.load(config.WORKSPACE, job_id)
+        job.status = JobStatus.rendered
+        job.save(config.WORKSPACE)
+        tail = "\n".join((result.stdout + result.stderr).strip().splitlines()[-5:])
+        raise ActionError(f"Re-render failed; the previous version is kept.\n{tail}")
+
+
 def reject(job_id: str, clip_id: str) -> int:
     """Mark a clip rejected and cancel any of its posts that haven't started. Returns how
     many posts were cancelled."""
@@ -194,6 +269,41 @@ def cancel_post(post_id: int) -> bool:
         return queue.cancel(conn, post_id)
     finally:
         conn.close()
+
+
+def mark_posted(post_id: int, url: str | None = None) -> None:
+    """You finished a TikTok draft in the app, or checked a needs_check post and it's live."""
+    conn = queue.connect()
+    try:
+        if not queue.mark_published(conn, post_id, url=(url or "").strip(), now=datetime.now()):
+            raise ActionError("That post can't be marked as posted any more.")
+    finally:
+        conn.close()
+
+
+def retry_post(post_id: int) -> Post:
+    """You checked the account and the post did NOT go out: schedule it again."""
+    conn = queue.connect()
+    try:
+        post = queue.requeue(conn, post_id, now=datetime.now())
+    finally:
+        conn.close()
+    if post is None:
+        raise ActionError("Only failed or needs-check posts can be retried.")
+    return post
+
+
+def give_up_post(post_id: int) -> None:
+    conn = queue.connect()
+    try:
+        if not queue.give_up(conn, post_id, now=datetime.now()):
+            raise ActionError("Only needs-check posts can be dropped.")
+    finally:
+        conn.close()
+
+
+def problem_count() -> int:
+    return len([p for p in posts() if p.status in (PostStatus.failed, PostStatus.needs_check)])
 
 
 def load_clip(job_id: str, clip_id: str):

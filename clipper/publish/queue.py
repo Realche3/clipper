@@ -77,12 +77,7 @@ def enabled_platforms() -> list[Platform]:
 
 
 def taken_slots(conn: sqlite3.Connection, platform: Platform) -> list[datetime]:
-    marks = ",".join("?" * len(_SLOT_STATUSES))
-    rows = conn.execute(
-        f"SELECT scheduled_at FROM posts WHERE platform = ? AND status IN ({marks})",
-        (platform.value, *_SLOT_STATUSES),
-    )
-    return [datetime.fromisoformat(r["scheduled_at"]) for r in rows]
+    return [t for t, _ in _slots_with_ids(conn, platform)]
 
 
 def enqueue(
@@ -252,6 +247,79 @@ def mark_stuck(conn: sqlite3.Connection, now: datetime, older_than: timedelta) -
         ),
     )
     return cur.rowcount
+
+
+# ---------------------------------------------------------------- manual fixes (dashboard)
+
+
+def mark_published(
+    conn: sqlite3.Connection, post_id: int, *, url: str | None, now: datetime
+) -> bool:
+    """A human confirms the post is live: a finished TikTok draft, or a needs_check that
+    turned out to have gone through."""
+    cur = conn.execute(
+        "UPDATE posts SET status = ?, url = COALESCE(?, url), error = NULL, updated_at = ?"
+        " WHERE id = ? AND status IN (?, ?)",
+        (
+            PostStatus.published.value,
+            url or None,
+            now.isoformat(),
+            post_id,
+            PostStatus.uploaded_draft.value,
+            PostStatus.needs_check.value,
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def requeue(conn: sqlite3.Connection, post_id: int, *, now: datetime) -> Post | None:
+    """A human confirms a failed / needs_check post did NOT go out: book it at the next
+    free slot with a fresh retry budget. Returns the updated post, or None if not allowed."""
+    post = get_post(conn, post_id)
+    if post is None or post.status not in (PostStatus.failed, PostStatus.needs_check):
+        return None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        taken = [
+            t
+            for t, pid in _slots_with_ids(conn, post.platform)
+            if pid != post_id  # its own old slot doesn't count
+        ]
+        slot = next_slot(
+            now,
+            taken,
+            interval=timedelta(minutes=config.POST_INTERVAL_MINUTES),
+            window=parse_window(config.POSTING_WINDOW),
+            daily_cap=daily_cap(post.platform),
+        )
+        conn.execute(
+            "UPDATE posts SET status = ?, scheduled_at = ?, attempts = 0, error = NULL,"
+            " updated_at = ? WHERE id = ?",
+            (PostStatus.scheduled.value, slot.isoformat(), now.isoformat(), post_id),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return get_post(conn, post_id)
+
+
+def give_up(conn: sqlite3.Connection, post_id: int, *, now: datetime) -> bool:
+    """needs_check -> failed, when a human decides not to post it after all."""
+    cur = conn.execute(
+        "UPDATE posts SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+        (PostStatus.failed.value, now.isoformat(), post_id, PostStatus.needs_check.value),
+    )
+    return cur.rowcount == 1
+
+
+def _slots_with_ids(conn: sqlite3.Connection, platform: Platform) -> list[tuple[datetime, int]]:
+    marks = ",".join("?" * len(_SLOT_STATUSES))
+    rows = conn.execute(
+        f"SELECT scheduled_at, id FROM posts WHERE platform = ? AND status IN ({marks})",
+        (platform.value, *_SLOT_STATUSES),
+    )
+    return [(datetime.fromisoformat(r["scheduled_at"]), r["id"]) for r in rows]
 
 
 def cancel(conn: sqlite3.Connection, post_id: int) -> bool:
