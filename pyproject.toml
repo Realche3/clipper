@@ -5,6 +5,7 @@ description = "YouTube -> vertical clips -> TikTok/IG"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic",
+    "av<19",  # faster-whisper 1.2.x calls av.open(metadata_errors=...), removed in PyAV 19
     "faster-whisper",
     "httpx",
     "numpy",
