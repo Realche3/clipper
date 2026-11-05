@@ -68,7 +68,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
   - Clip grid with a video player, approve/reject, and editable caption and hashtags.
   - Approving calls `enqueue`. The queue view shows each post's status.
   - TikTok drafts get a **copy caption** button and the suggested sound.
-- [ ] **B8 Dashboard v2:** editing the hook, start, or end runs `clipper stage render <job> --clip <id> --force`. Add views for errors, failed posts, and `needs_check`. Add a manual "mark as posted" button for TikTok drafts.
+- [x] **B8 Dashboard v2:** editing the hook, start, or end runs `clipper stage render <job> --clip <id> --force`. Add views for errors, failed posts, and `needs_check`. Add a manual "mark as posted" button for TikTok drafts.
 
 ---
 
