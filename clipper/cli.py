@@ -65,5 +65,35 @@ def stage(
     _run_stage(name, Job.load(config.WORKSPACE, job_id), force, clip)
 
 
+@app.command("scheduler")
+def scheduler_cmd(
+    once: bool = typer.Option(False, "--once", help="Run a single tick and exit."),
+) -> None:
+    """Post queued clips when they're due. Uses the dry-run client unless DRY_RUN=false."""
+    from clipper.publish import queue
+    from clipper.publish import scheduler as sched
+    from clipper.publish.clients import make_clients
+
+    config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(config.WORKSPACE / "scheduler.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+
+    try:
+        clients = make_clients(queue.enabled_platforms())
+    except (NotImplementedError, queue.EnqueueError) as e:
+        typer.echo(f"can't start scheduler: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    conn = queue.connect()
+    if once:
+        typer.echo(f"processed {sched.run_once(conn, clients)} post(s)")
+        return
+    try:
+        sched.run_forever(conn, clients)
+    except KeyboardInterrupt:
+        typer.echo("scheduler stopped")
+
+
 if __name__ == "__main__":
     app()

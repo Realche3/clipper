@@ -117,9 +117,9 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 - **Queue (`workspace/clipper.db`, table `posts`):** id, job_id, clip_id, platform, status, scheduled_at, attempts, remote_id, url, error, updated_at. UNIQUE(job_id, clip_id, platform), which is the double-post guard.
 - **Slotting:** the next free slot per platform, at least `POST_INTERVAL_MINUTES` after the previous one, inside `POSTING_WINDOW` (e.g. 10:00–23:30 local), under `DAILY_CAP_<PLATFORM>`. Otherwise it moves to the next day.
 - **Scheduler loop (every 60s):** claim due rows (`scheduled → uploading`, in one transaction), call the client, then set `published` / `uploaded_draft` or `failed`.
-  - Retry with backoff (5, 15, then 45 min), 3 attempts at most.
+  - Retry with backoff (5, 15, then 45 min): up to 3 retries, 4 tries in total. A retry that falls outside the posting window moves to the next window start.
   - A row stuck in `uploading` for more than 15 min becomes `needs_check`. **We never retry blindly**, because that's how double posts happen.
-- **Clients:** they share one interface: `publish(clip, job) -> PostResult`.
+- **Clients:** they share one interface, `publish(job, clip) -> PostResult` (`publish/clients.py`). A client raises `PublishError(retryable=...)` only when it is **sure nothing went out**: retryable gets retried, otherwise the post is `failed`. Any other exception, including `UploadStateUnknown`, sends the post to `needs_check`.
   - `TikTokClient`: inbox upload.
   - `InstagramClient`: Reels resumable upload, then publish.
   - `DryRunClient`: logs only. It's used whenever `DRY_RUN=true`, which is **the default**.
