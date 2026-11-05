@@ -41,9 +41,12 @@ def run(
     ),
     force: bool = False,
     until: str = "render",
+    job_id: str = typer.Option(
+        None, "--job-id", help="Use this job id (the dashboard picks it so it can track progress)."
+    ),
 ) -> None:
-    """Run the pipeline on a YouTube URL or local file (stops at render, ready for review)."""
-    job = Job(id=uuid.uuid4().hex[:8], source_url=url, context=context)
+    """Run the pipeline on a YouTube URL (stops at render, ready for review)."""
+    job = Job(id=job_id or uuid.uuid4().hex[:8], source_url=url, context=context)
     job.save(config.WORKSPACE)
     typer.echo(f"job {job.id}")
     for stage in STAGES[: STAGES.index(until) + 1]:
@@ -63,6 +66,23 @@ def stage(
     if clip and name != "render":
         raise typer.BadParameter("--clip only works with the render stage")
     _run_stage(name, Job.load(config.WORKSPACE, job_id), force, clip)
+
+
+@app.command()
+def ui() -> None:
+    """Open the dashboard in your browser."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    app_file = Path(__file__).parent / "ui" / "app.py"
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", str(app_file)]
+        # localhost only: the dashboard can approve posts, so don't expose it on the network
+        + ["--server.address", "localhost", "--browser.gatherUsageStats", "false"],
+        cwd=config.ROOT,
+        check=False,
+    )
 
 
 @app.command("scheduler")
