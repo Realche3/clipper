@@ -173,6 +173,87 @@ def list_posts(
     return [_row_to_post(r) for r in conn.execute(sql, args)]
 
 
+# ---------------------------------------------------------------- scheduler side
+
+
+def claim_next(conn: sqlite3.Connection, now: datetime, platforms: list[Platform]) -> Post | None:
+    """Atomically move the earliest due post (on one of `platforms`) from scheduled to
+    uploading and return it. One statement, so two schedulers can never claim the same row.
+    """
+    if not platforms:
+        return None
+    marks = ",".join("?" * len(platforms))
+    row = conn.execute(
+        "UPDATE posts SET status = ?, attempts = attempts + 1, updated_at = ?"
+        " WHERE id = (SELECT id FROM posts WHERE status = ? AND scheduled_at <= ?"
+        f"             AND platform IN ({marks}) ORDER BY scheduled_at, id LIMIT 1)"
+        " RETURNING *",
+        (
+            PostStatus.uploading.value,
+            now.isoformat(),
+            PostStatus.scheduled.value,
+            now.isoformat(),
+            *(p.value for p in platforms),
+        ),
+    ).fetchone()
+    return _row_to_post(row) if row else None
+
+
+def record_success(
+    conn: sqlite3.Connection,
+    post_id: int,
+    *,
+    status: PostStatus,
+    remote_id: str | None,
+    url: str | None,
+    now: datetime,
+) -> None:
+    conn.execute(
+        "UPDATE posts SET status = ?, remote_id = ?, url = ?, error = NULL, updated_at = ?"
+        " WHERE id = ?",
+        (status.value, remote_id, url, now.isoformat(), post_id),
+    )
+
+
+def record_retry(
+    conn: sqlite3.Connection, post_id: int, *, error: str, retry_at: datetime, now: datetime
+) -> None:
+    """The upload definitely didn't happen; put it back in the queue for later."""
+    conn.execute(
+        "UPDATE posts SET status = ?, scheduled_at = ?, error = ?, updated_at = ? WHERE id = ?",
+        (PostStatus.scheduled.value, retry_at.isoformat(), error, now.isoformat(), post_id),
+    )
+
+
+def record_final(
+    conn: sqlite3.Connection, post_id: int, *, status: PostStatus, error: str, now: datetime
+) -> None:
+    """Stop processing this post: `failed` (gave up) or `needs_check` (human must verify)."""
+    conn.execute(
+        "UPDATE posts SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        (status.value, error, now.isoformat(), post_id),
+    )
+
+
+def mark_stuck(conn: sqlite3.Connection, now: datetime, older_than: timedelta) -> int:
+    """Posts left in `uploading` (e.g. the scheduler crashed mid-upload) become needs_check.
+
+    We can't know whether the upload went through, so a human checks instead of a retry.
+    """
+    cur = conn.execute(
+        "UPDATE posts SET status = ?, error = ?, updated_at = ?"
+        " WHERE status = ? AND updated_at < ?",
+        (
+            PostStatus.needs_check.value,
+            "upload was interrupted; check the account before re-posting",
+            now.isoformat(),
+            PostStatus.uploading.value,
+            (now - older_than).isoformat(),
+        ),
+    )
+    return cur.rowcount
+
+
 def cancel(conn: sqlite3.Connection, post_id: int) -> bool:
     """Remove a post that hasn't started uploading. Returns False if it can't be cancelled."""
     cur = conn.execute(
