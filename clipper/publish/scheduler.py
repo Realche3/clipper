@@ -147,4 +147,11 @@ def run_forever(
             run_once(conn, clients)
         except sqlite3.Error:
             log.exception("database error during tick; will retry next tick")
+        heartbeat_file().write_text(datetime.now().isoformat(), encoding="utf-8")
         sleep(tick_seconds)
+
+
+def heartbeat_file() -> Path:
+    """Touched every tick so the dashboard can tell whether the scheduler is running."""
+    config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+    return config.WORKSPACE / "scheduler.heartbeat"

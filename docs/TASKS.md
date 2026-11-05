@@ -63,7 +63,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 - [x] **B4 Scheduler** (`publish/scheduler.py`, `publish/dryrun.py`): a loop every 60s that claims due rows with `scheduled→uploading`, calls the client, and records the result. Retries at 5, 15, and 45 min. A row stuck for more than 15 min becomes `needs_check`. Use `DryRunClient` whenever `DRY_RUN=true`. Add the `clipper scheduler` command.
 - [ ] **B5 TikTok** (`publish/tiktok.py`, `publish/auth.py`): `clipper auth tiktok` runs the OAuth flow once and saves tokens to `secrets/tokens.json` with auto-refresh. Upload via inbox `FILE_UPLOAD` as a single chunk, which leaves `uploaded_draft`.
 - [ ] **B6 Instagram** (`publish/instagram.py`): `clipper auth instagram` gets a long-lived token and refreshes it. Flow: Reels container (`upload_type=resumable`), upload the local file, poll the status, publish. The caption is caption + hashtags + credit. Saves `remote_id` and `url`.
-- [ ] **B7 Dashboard v1** (`clipper/ui/app.py`, `clipper ui` command):
+- [x] **B7 Dashboard v1** (`clipper/ui/app.py`, `clipper ui` command):
   - Paste a URL plus an optional **context note** ("what is this video about?") to spawn `clipper run --context ...` as a subprocess. Show the job list with status.
   - Clip grid with a video player, approve/reject, and editable caption and hashtags.
   - Approving calls `enqueue`. The queue view shows each post's status.
