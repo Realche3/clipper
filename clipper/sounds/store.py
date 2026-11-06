@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -60,8 +61,18 @@ class SoundsFile(BaseModel):
 
 
 def _norm(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)  # "Róisín" == "Roisin"
+    text = "".join(c for c in text if not unicodedata.combining(c))
     text = re.sub(r"['’`]", "", text.lower())  # "Don’t" == "dont"
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+GENERIC_TITLES = {"original audio", "original sound", "original song", "audio", "sound"}
+
+
+def is_findable(sound: Sound) -> bool:
+    """'Original audio' with no creator can't be searched for, so it's useless as a tip."""
+    return bool(sound.artist) or _norm(sound.title) not in GENERIC_TITLES
 
 
 def search_url(label: str) -> str:

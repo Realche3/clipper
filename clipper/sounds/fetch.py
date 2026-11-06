@@ -20,7 +20,15 @@ import httpx
 from pydantic import BaseModel
 
 from clipper import config, llm
-from clipper.sounds.store import Sound, SoundsFile, SourceResult, load_fetched, merge, save_fetched
+from clipper.sounds.store import (
+    Sound,
+    SoundsFile,
+    SourceResult,
+    is_findable,
+    load_fetched,
+    merge,
+    save_fetched,
+)
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +87,8 @@ You read a web page that lists currently trending songs and sounds for TikTok an
 Instagram Reels, and you return that list as data.
 
 - Include every song or sound the page presents as trending right now, in page order.
-- title: the song or sound name only. artist: the artist or creator, or null if not given.
+- title: the song or sound name only. artist: the artist or creator, or null if not given. \
+For a creator's "original sound", put the creator's name in artist.
 - platform: tiktok or instagram if the page or section says so, both if it covers both.
 - vibe: the mood a creator would use it for: hype (energetic, action), funny (comedic, \
 meme), chill (calm, aesthetic), or dramatic (emotional, tense, epic). Use your knowledge of \
@@ -90,13 +99,21 @@ the song when the page doesn't say.
 
 
 def extract(url: str, text: str) -> list[Sound]:
-    result = llm.ask_json(SYSTEM, f"Page URL: {url}\n\nPage text:\n{text}", Extracted)
-    return [
+    result = llm.ask_json(
+        SYSTEM,
+        f"Page URL: {url}\n\nPage text:\n{text}",
+        Extracted,
+        model=config.CLAUDE_MODEL_SOUNDS,
+        task="sounds",
+        effort="low",  # plain list extraction
+    )
+    sounds = [
         Sound(title=s.title.strip(), artist=(s.artist or "").strip() or None,
               platform=s.platform, vibe=s.vibe, source=url)
         for s in result.sounds
         if s.title.strip()
     ]  # fmt: skip
+    return [s for s in sounds if is_findable(s)]
 
 
 # ---------------------------------------------------------------- refresh

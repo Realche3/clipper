@@ -343,4 +343,6 @@ PAGES = {"New video": page_new, "Jobs": page_jobs, "Queue": page_queue, "Sounds"
 page = st.sidebar.radio("Page", list(PAGES), key="page")
 if due := len(actions.due_now()):
     st.sidebar.success(f"🔔 {due} post(s) due now on the **Queue** page")
+today, week = actions.claude_spend()
+st.sidebar.caption(f"💸 Claude API: ~${today:.2f} today · ~${week:.2f} last 7 days")
 PAGES[page]()

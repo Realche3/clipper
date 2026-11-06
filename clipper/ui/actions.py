@@ -13,12 +13,12 @@ import sys
 import uuid
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pyperclip
 
-from clipper import config
+from clipper import config, llm
 from clipper.captions.generate import normalize_hashtag
 from clipper.models import Job, JobStatus, Platform, Post, PostStatus, ReviewStatus
 from clipper.publish import queue
@@ -392,6 +392,14 @@ def refresh_sounds() -> int:
         return len(refresh().sounds)
     except SoundsError as e:
         raise ActionError(str(e)) from e
+
+
+def claude_spend() -> tuple[float, float]:
+    """Estimated Claude API spend (today, last 7 days) from workspace/claude_usage.jsonl."""
+    rows = llm.load_usage()
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return llm.spend_since(today, rows), llm.spend_since(now - timedelta(days=7), rows)
 
 
 PLATFORM_LABEL = {Platform.tiktok: "TikTok", Platform.instagram: "Instagram"}
