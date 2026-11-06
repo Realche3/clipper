@@ -5,7 +5,6 @@ import pytest
 from clipper import config, llm
 from clipper.captions import generate
 from clipper.captions.generate import CaptionSet, ClipCaption
-from clipper.captions.sounds import Sound, load_sounds, pick_sound
 from clipper.models import Job, JobStatus
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -27,6 +26,7 @@ def sounds_file(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(config, "TRENDING_SOUNDS_FILE", f)
+    monkeypatch.setattr(config, "TRENDING_SOUNDS_JSON", tmp_path / "none.json")  # pinned only
     monkeypatch.setattr(config, "BASE_HASHTAGS", ["#gta6", "#gaming"])
     return f
 
@@ -52,6 +52,7 @@ def _cap(id, vibe="hype", **kw):
         caption="Cops had no chance 😂 would you have made it?",
         hashtags=["#GTA6Chase", "vicecity", "#gta6"],
         vibe=vibe,
+        sound=None,
     )
     return ClipCaption(**{**base, **kw})
 
@@ -157,21 +158,31 @@ def test_merge_hashtags_caps_extras():
     assert len(out) == 1 + generate.EXTRA_HASHTAGS_MAX
 
 
-# ---- sounds
+# ---- sound picks
 
 
-def test_pick_sound_rotates_within_vibe():
-    sounds = [Sound(name="A", vibe="hype"), Sound(name="B", vibe="hype")]
-    assert [pick_sound(sounds, "hype", i) for i in range(3)] == ["A", "B", "A"]
+def test_prompt_lists_numbered_sounds(monkeypatch, job):
+    calls = _fake_claude(monkeypatch, CaptionSet(clips=[_cap("c01"), _cap("c02")]))
+    generate.run(job)
+    prompt = calls[0][1]
+    assert "1. Hype A (tiktok, hype)" in prompt and "3. Funny A (tiktok, funny)" in prompt
 
 
-def test_pick_sound_falls_back_to_any_vibe_or_none():
-    assert pick_sound([Sound(name="A", vibe="hype")], "chill") == "A"
-    assert pick_sound([], "hype") is None
+def test_claude_sound_pick_is_used(monkeypatch, job):
+    _fake_claude(monkeypatch, CaptionSet(clips=[_cap("c01", sound=3), _cap("c02", sound=2)]))
+    out = generate.run(job)
+    assert [c.suggested_sound for c in out.clips] == ["Funny A", "Hype B"]
 
 
-def test_load_sounds_handles_missing_and_broken_files(tmp_path):
-    assert load_sounds(tmp_path / "nope.yaml") == []
-    bad = tmp_path / "bad.yaml"
-    bad.write_text("sounds: [::", encoding="utf-8")
-    assert load_sounds(bad) == []
+@pytest.mark.parametrize("bad", [0, 4, 99, -1])
+def test_out_of_range_pick_falls_back_to_vibe(monkeypatch, job, bad):
+    _fake_claude(monkeypatch, CaptionSet(clips=[_cap("c01", sound=bad), _cap("c02")]))
+    assert generate.run(job).clips[0].suggested_sound == "Hype A"
+
+
+def test_no_sounds_at_all(monkeypatch, job, sounds_file):
+    sounds_file.write_text("sounds: []", encoding="utf-8")
+    calls = _fake_claude(monkeypatch, CaptionSet(clips=[_cap("c01"), _cap("c02")]))
+    out = generate.run(job)
+    assert "(none)" in calls[0][1]
+    assert out.clips[0].suggested_sound is None

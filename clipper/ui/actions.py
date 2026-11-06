@@ -11,14 +11,20 @@ import re
 import subprocess
 import sys
 import uuid
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+import pyperclip
 
 from clipper import config
 from clipper.captions.generate import normalize_hashtag
 from clipper.models import Job, JobStatus, Platform, Post, PostStatus, ReviewStatus
 from clipper.publish import queue
+from clipper.publish.text import post_text
+from clipper.sounds.fetch import SoundsError, refresh
+from clipper.sounds.store import Sound, all_sounds, load_fetched
 
 LOG_NAME = "job.log"
 _URL = re.compile(r"^https?://\S+$")
@@ -179,12 +185,7 @@ def approve(job_id: str, clip_id: str) -> list[Post]:
 MIN_CLIP_SECONDS = 3.0  # platform minimum for Reels/TikTok
 MAX_CLIP_SECONDS = 180.0
 RENDER_TIMEOUT = 600
-_LOCKED_STATUSES = {
-    PostStatus.uploading,
-    PostStatus.uploaded_draft,
-    PostStatus.published,
-    PostStatus.needs_check,
-}
+_LOCKED_STATUSES = {PostStatus.published}  # once it's out, the file must not change
 
 
 def edit_clip(job_id: str, clip_id: str, hook_text: str, start: float, end: float) -> None:
@@ -195,7 +196,7 @@ def edit_clip(job_id: str, clip_id: str, hook_text: str, start: float, end: floa
     job = _editable(job_id)
     clip = job.clip(clip_id)
     if any(p.status in _LOCKED_STATUSES for p in posts_for_clip(job_id, clip_id)):
-        raise ActionError("This clip has already been uploaded; it can't be changed now.")
+        raise ActionError("This clip has already been posted; it can't be changed now.")
     if start < 0 or end <= start:
         raise ActionError("End must be after start.")
     if job.duration and end > job.duration + 0.5:
@@ -263,6 +264,16 @@ def posts_for_clip(job_id: str, clip_id: str) -> list[Post]:
     return [p for p in posts() if p.job_id == job_id and p.clip_id == clip_id]
 
 
+def due_now(now: datetime | None = None) -> list[Post]:
+    now = now or datetime.now()
+    return [p for p in posts(PostStatus.scheduled) if p.scheduled_at <= now]
+
+
+def up_next(now: datetime | None = None) -> list[Post]:
+    now = now or datetime.now()
+    return [p for p in posts(PostStatus.scheduled) if p.scheduled_at > now]
+
+
 def cancel_post(post_id: int) -> bool:
     conn = queue.connect()
     try:
@@ -272,38 +283,22 @@ def cancel_post(post_id: int) -> bool:
 
 
 def mark_posted(post_id: int, url: str | None = None) -> None:
-    """You finished a TikTok draft in the app, or checked a needs_check post and it's live."""
+    """You posted it by hand. The optional link is shown on the Posted list."""
     conn = queue.connect()
     try:
         if not queue.mark_published(conn, post_id, url=(url or "").strip(), now=datetime.now()):
-            raise ActionError("That post can't be marked as posted any more.")
+            raise ActionError("That post is already marked as posted (or was cancelled).")
     finally:
         conn.close()
 
 
-def retry_post(post_id: int) -> Post:
-    """You checked the account and the post did NOT go out: schedule it again."""
+def undo_posted(post_id: int) -> None:
     conn = queue.connect()
     try:
-        post = queue.requeue(conn, post_id, now=datetime.now())
+        if not queue.unmark_published(conn, post_id, now=datetime.now()):
+            raise ActionError("That post isn't marked as posted.")
     finally:
         conn.close()
-    if post is None:
-        raise ActionError("Only failed or needs-check posts can be retried.")
-    return post
-
-
-def give_up_post(post_id: int) -> None:
-    conn = queue.connect()
-    try:
-        if not queue.give_up(conn, post_id, now=datetime.now()):
-            raise ActionError("Only needs-check posts can be dropped.")
-    finally:
-        conn.close()
-
-
-def problem_count() -> int:
-    return len([p for p in posts() if p.status in (PostStatus.failed, PostStatus.needs_check)])
 
 
 def load_clip(job_id: str, clip_id: str):
@@ -311,9 +306,92 @@ def load_clip(job_id: str, clip_id: str):
     return job, job.clip(clip_id)
 
 
-def scheduler_last_seen() -> datetime | None:
-    beat = config.WORKSPACE / "scheduler.heartbeat"
-    return datetime.fromtimestamp(beat.stat().st_mtime) if beat.exists() else None
+# ---------------------------------------------------------------- post kit (ARCHITECTURE §5.6)
+# The dashboard runs on your own computer, so these act on this machine directly.
+
+
+def upload_url(platform: Platform) -> str:
+    return {
+        Platform.tiktok: config.TIKTOK_UPLOAD_URL,
+        Platform.instagram: config.INSTAGRAM_UPLOAD_URL,
+    }[platform]
+
+
+def copy_text(post_id: int) -> str:
+    """Copy the platform-formatted caption + hashtags + credit to the clipboard."""
+    text = _post_text(post_id)
+    try:
+        pyperclip.copy(text)
+    except pyperclip.PyperclipException as e:
+        raise ActionError(f"Couldn't use the clipboard ({e}). Copy the text from the box.") from e
+    return text
+
+
+def reveal_file(post_id: int) -> Path:
+    """Open Explorer / Finder with the clip selected, ready to drag into the upload page."""
+    path = _clip_file(post_id)
+    if sys.platform == "win32":
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path.parent)])
+    return path
+
+
+def open_upload_page(post_id: int) -> str:
+    url = upload_url(_get_post(post_id).platform)
+    webbrowser.open_new_tab(url)
+    return url
+
+
+def start_posting(post_id: int) -> None:
+    """One click: caption on the clipboard, file shown, upload page opened."""
+    _clip_file(post_id)  # fail early, before touching anything, if the file is gone
+    copy_text(post_id)
+    reveal_file(post_id)
+    open_upload_page(post_id)
+
+
+def _get_post(post_id: int) -> Post:
+    conn = queue.connect()
+    try:
+        post = queue.get_post(conn, post_id)
+    finally:
+        conn.close()
+    if post is None:
+        raise ActionError("That post no longer exists.")
+    return post
+
+
+def _post_text(post_id: int) -> str:
+    post = _get_post(post_id)
+    job, clip = load_clip(post.job_id, post.clip_id)
+    return post_text(job, clip, post.platform)
+
+
+def _clip_file(post_id: int) -> Path:
+    post = _get_post(post_id)
+    _, clip = load_clip(post.job_id, post.clip_id)
+    if clip.file is None or not clip.file.exists():
+        raise ActionError("The rendered clip file is missing. Re-render it on the Jobs page.")
+    return clip.file
+
+
+# ---------------------------------------------------------------- trending sounds
+
+
+def sounds_overview() -> tuple[list[Sound], datetime | None]:
+    fetched = load_fetched()
+    return all_sounds(), (fetched.fetched_at if fetched else None)
+
+
+def refresh_sounds() -> int:
+    """Fetch the trending lists now (~1 min). Returns how many sounds were saved."""
+    try:
+        return len(refresh().sounds)
+    except SoundsError as e:
+        raise ActionError(str(e)) from e
 
 
 PLATFORM_LABEL = {Platform.tiktok: "TikTok", Platform.instagram: "Instagram"}

@@ -1,5 +1,5 @@
 """Captions stage: one Claude call per job writes hook, title, caption, hashtags and vibe
-for every clip, then we normalize the output and attach a suggested trending sound.
+for every clip, and picks a sound from the trending list (clipper/sounds), then we normalize.
 
 Spec: docs/ARCHITECTURE.md §5.3. Never fails the pipeline: any Claude problem -> fallback.
 """
@@ -14,8 +14,8 @@ from typing import Literal
 from pydantic import BaseModel
 
 from clipper import config, llm
-from clipper.captions.sounds import load_sounds, pick_sound
 from clipper.models import Clip, Job, JobStatus, Transcript
+from clipper.sounds.store import Sound, all_sounds, pick_sound
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ Vibe = Literal["hype", "funny", "chill", "dramatic"]
 HOOK_MAX_WORDS = 6
 CAPTION_MAX_CHARS = 150
 EXTRA_HASHTAGS_MAX = 5
+MAX_SOUNDS_IN_PROMPT = 150  # ~15 tokens each
 
 
 # ---------------------------------------------------------------- LLM schema
@@ -36,6 +37,7 @@ class ClipCaption(BaseModel):
     caption: str
     hashtags: list[str]
     vibe: Vibe
+    sound: int | None  # number from the trending sounds list, or null
 
 
 class CaptionSet(BaseModel):
@@ -61,6 +63,9 @@ drive comments.
 - hashtags: 3 to 5 hashtags specific to this video's niche and this moment (the game or \
 topic name plus what happens), not generic tags like #fyp or #viral.{base_tags_rule}
 - vibe: one of hype, funny, chill, dramatic, whichever best fits the moment.
+- sound: the number of the trending sound from the list below that best fits this clip's \
+moment, vibe and audience (it will be added in the TikTok/Instagram editor over the clip). \
+Prefer different sounds for different clips. null if the list is empty.
 
 Rules:
 - Base everything on what you are given. Do not invent events, names, or facts that are \
@@ -83,9 +88,9 @@ def run(job: Job, force: bool = False) -> Job:
         return job
 
     transcript = _load_transcript(job)
-    captions = _ask_claude(job, transcript)
+    sounds = all_sounds()[:MAX_SOUNDS_IN_PROMPT]
+    captions = _ask_claude(job, transcript, sounds)
 
-    sounds = load_sounds(config.TRENDING_SOUNDS_FILE)
     for i, clip in enumerate(job.clips):
         cap = captions.get(clip.id)
         if cap is None:
@@ -94,7 +99,7 @@ def run(job: Job, force: bool = False) -> Job:
             _apply_fallback(clip, job)
         else:
             _apply_caption(clip, cap)
-        clip.suggested_sound = pick_sound(sounds, clip.vibe, index=i)
+        clip.suggested_sound = _sound_for(cap, sounds, clip.vibe, i)
 
     job.status = JobStatus.captioned
     return job
@@ -117,7 +122,7 @@ def _load_transcript(job: Job) -> Transcript | None:
     return Transcript.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def build_prompt(job: Job, transcript: Transcript | None) -> str:
+def build_prompt(job: Job, transcript: Transcript | None, sounds: list[Sound] | None = None) -> str:
     lines = [
         f"Poster's note: {job.context or '(none)'}",
         f"Source video title: {job.title or 'unknown'}",
@@ -134,10 +139,26 @@ def build_prompt(job: Job, transcript: Transcript | None) -> str:
             f"  why it was picked: {clip.reason or 'n/a'}",
             f"  transcript: {text or '(no speech)'}",
         ]
+    lines += ["", "Trending sounds (pick by number):"]
+    lines += [
+        f"{i}. {s.label} ({s.platform}, {s.vibe})" for i, s in enumerate(sounds or [], start=1)
+    ] or ["(none)"]
     return "\n".join(lines)
 
 
-def _ask_claude(job: Job, transcript: Transcript | None) -> dict[str, ClipCaption]:
+def _sound_for(
+    cap: ClipCaption | None, sounds: list[Sound], vibe: str | None, i: int
+) -> str | None:
+    """Claude's pick if it's a valid number from the list, else a vibe-based fallback."""
+    if cap is not None and cap.sound is not None and 1 <= cap.sound <= len(sounds):
+        return sounds[cap.sound - 1].label
+    fallback = pick_sound(sounds, vibe, index=i)
+    return fallback.label if fallback else None
+
+
+def _ask_claude(
+    job: Job, transcript: Transcript | None, sounds: list[Sound]
+) -> dict[str, ClipCaption]:
     rule = (
         f" Do not repeat these tags, which are added automatically: "
         f"{' '.join(config.BASE_HASHTAGS)}."
@@ -146,7 +167,7 @@ def _ask_claude(job: Job, transcript: Transcript | None) -> dict[str, ClipCaptio
     )
     system = SYSTEM.format(base_tags_rule=rule)
     try:
-        result = llm.ask_json(system, build_prompt(job, transcript), CaptionSet)
+        result = llm.ask_json(system, build_prompt(job, transcript, sounds), CaptionSet)
     except llm.LLMError as e:
         log.warning("captions: Claude failed (%s); using fallback captions", e)
         return {}

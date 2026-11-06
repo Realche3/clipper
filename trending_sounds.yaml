@@ -1,6 +1,9 @@
-# Update by hand daily from TikTok/IG trending audio. captions stage picks one per clip
-# and writes it as `suggested_sound` so you know what to add in-app before publishing.
-sounds:
-  - name: "example sound name"
-    platform: tiktok
-    vibe: hype        # hype | funny | chill | dramatic
+# Hand-pinned sounds: always offered to Claude first, on top of the fetched list
+# (`uv run clipper sounds refresh` writes workspace/trending_sounds.json).
+# Pin a sound you know is trending right now, e.g.:
+#
+#   - title: "Song name"
+#     artist: "Artist"
+#     platform: tiktok      # tiktok | instagram | both
+#     vibe: hype            # hype | funny | chill | dramatic
+sounds: []

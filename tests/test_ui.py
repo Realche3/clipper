@@ -1,4 +1,3 @@
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -6,7 +5,6 @@ from streamlit.testing.v1 import AppTest
 
 from clipper import config
 from clipper.models import Clip, Job, JobStatus, Platform, PostStatus, ReviewStatus
-from clipper.publish import queue
 from clipper.ui import actions
 
 APP = str(Path(__file__).parents[1] / "clipper" / "ui" / "app.py")
@@ -17,7 +15,8 @@ def settings(monkeypatch, tmp_path):
     ws = tmp_path / "ws"
     monkeypatch.setattr(config, "WORKSPACE", ws)
     monkeypatch.setattr(config, "DB_FILE", ws / "clipper.db")
-    monkeypatch.setattr(config, "DRY_RUN", True)
+    monkeypatch.setattr(config, "TRENDING_SOUNDS_FILE", tmp_path / "pinned.yaml")
+    monkeypatch.setattr(config, "TRENDING_SOUNDS_JSON", ws / "trending_sounds.json")
     monkeypatch.setattr(config, "AUTO_APPROVE", False)
     monkeypatch.setattr(config, "ENABLED_PLATFORMS", ["tiktok", "instagram"])
     monkeypatch.setattr(config, "POSTING_WINDOW", "00:00-23:59")
@@ -96,14 +95,13 @@ def test_reject_cancels_scheduled_posts(rendered_job):
     assert Job.load(config.WORKSPACE, "j1").clip("c01").review == ReviewStatus.rejected
 
 
-def test_reject_leaves_posts_already_uploading(rendered_job):
+def test_reject_leaves_posts_already_posted(rendered_job):
     actions.approve("j1", "c01")
-    conn = queue.connect()
-    queue.claim_next(conn, datetime(2100, 1, 1), [Platform.tiktok])
-    conn.close()
+    [tt] = [p for p in actions.posts_for_clip("j1", "c01") if p.platform == Platform.tiktok]
+    actions.mark_posted(tt.id)
     assert actions.reject("j1", "c01") == 1
     [left] = actions.posts_for_clip("j1", "c01")
-    assert left.status == PostStatus.uploading
+    assert left.status == PostStatus.published
 
 
 def test_save_copy_normalizes_hashtags(rendered_job):
@@ -149,19 +147,6 @@ def test_jobs_page_shows_clips_and_approve_works(rendered_job):
     at.button(key="ok-j1-c01").click().run()
     assert not at.exception
     assert Job.load(config.WORKSPACE, "j1").clip("c01").review == ReviewStatus.approved
-
-
-def test_queue_page_shows_tiktok_draft_text(rendered_job):
-    actions.approve("j1", "c01")
-    conn = queue.connect()
-    [tt] = queue.list_posts(conn, platform=Platform.tiktok)
-    queue.record_success(
-        conn, tt.id, status=PostStatus.uploaded_draft, remote_id="x", url=None, now=datetime.now()
-    )
-    conn.close()
-    at = run_app("Queue")
-    assert not at.exception
-    assert any("old #gta6" in c.value for c in at.code)
 
 
 def test_new_video_form_rejects_bad_link():

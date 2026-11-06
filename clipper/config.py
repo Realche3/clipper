@@ -24,10 +24,10 @@ WORKSPACE = Path(_get("WORKSPACE", str(ROOT / "workspace")))
 DB_FILE = WORKSPACE / "clipper.db"
 SECRETS_DIR = ROOT / "secrets"
 MUSIC_DIR = ROOT / "music"
-TRENDING_SOUNDS_FILE = ROOT / "trending_sounds.yaml"
+TRENDING_SOUNDS_FILE = ROOT / "trending_sounds.yaml"  # hand-pinned sounds (always suggested first)
+TRENDING_SOUNDS_JSON = WORKSPACE / "trending_sounds.json"  # fetched by `clipper sounds refresh`
 
-# Safety
-DRY_RUN = _bool("DRY_RUN", True)  # True = never touch real accounts
+# Review
 AUTO_APPROVE = _bool("AUTO_APPROVE", False)
 
 # LLM
@@ -57,11 +57,30 @@ BASE_HASHTAGS = [
     f"#{t.strip().lstrip('#')}" for t in _get("BASE_HASHTAGS", "").split(",") if t.strip()
 ]
 
-# Publish
-TIKTOK_CLIENT_KEY = _get("TIKTOK_CLIENT_KEY")
-TIKTOK_CLIENT_SECRET = _get("TIKTOK_CLIENT_SECRET")
-IG_APP_ID = _get("IG_APP_ID")
-IG_APP_SECRET = _get("IG_APP_SECRET")
+# Trending sounds: public weekly roundups of trending TikTok / Reels audio (comma-separated)
+DEFAULT_TRENDING_SOURCES = (  # ~90-100 unique sounds together (checked Nov 6, 2026)
+    "https://metricool.com/trending-tiktok-songs,"
+    "https://metricool.com/trending-instagram-songs,"
+    "https://socialpilot.co/blog/instagram-reels-trends,"
+    "https://www.socialpilot.co/blog/tiktok-trends,"
+    "https://later.com/blog/tiktok-trends/,"
+    "https://later.com/blog/instagram-reels-trends/,"
+    "https://buffer.com/resources/trending-songs-tiktok/,"
+    "https://tokchart.com/,"
+    "https://inmagic.ai/trending-instagram-reels-songs/,"
+    "https://creatordb.app/free-tools/trending-instagram-audio/,"
+    "https://www.heyorca.com/blog/trending-audio-for-reels-tiktok,"
+    "https://vistasocial.com/insights/trending-audio-on-instagram/"
+)
+TRENDING_SOURCES = [
+    u.strip()
+    for u in (_get("TRENDING_SOURCES") or DEFAULT_TRENDING_SOURCES).split(",")  # empty = defaults
+    if u.strip()
+]
+
+# Posting (manual post kit, ARCHITECTURE.md D18)
+TIKTOK_UPLOAD_URL = _get("TIKTOK_UPLOAD_URL") or "https://www.tiktok.com/tiktokstudio/upload"
+INSTAGRAM_UPLOAD_URL = _get("INSTAGRAM_UPLOAD_URL") or "https://www.instagram.com/"
 ENABLED_PLATFORMS = _get("ENABLED_PLATFORMS", "tiktok,instagram").split(",")
 POST_INTERVAL_MINUTES = int(_get("POST_INTERVAL_MINUTES", "90"))
 POSTING_WINDOW = _get("POSTING_WINDOW", "10:00-23:30")  # local time

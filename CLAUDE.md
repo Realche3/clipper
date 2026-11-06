@@ -9,12 +9,13 @@ A tool that takes a YouTube link, cuts it into several vertical short clips (9:1
 
 ## Pipeline (each stage is a separate module)
 ```
-URL/file ─► ingest ─► analyze ─► captions ─► render ─► review (UI) ─► post queue ─► scheduler
-            yt-dlp    whisper +   Claude:     ffmpeg    approve/edit    SQLite        TikTok draft
-                      signals +   hook,       9:16 +                                  IG Reels
-                      Claude rank caption     subtitles
+URL/file ─► ingest ─► analyze ─► captions ─► render ─► review (UI) ─► post queue ─► post kit (UI)
+            yt-dlp    whisper +   Claude:     ffmpeg    approve/edit    SQLite        copy · show file
+                      signals +   hook,       9:16 +                                  · open upload page
+                      Claude rank caption,    subtitles                               · mark as posted
+                                  sound pick
 ```
-The processes are `clipper run` (pipeline worker), `clipper ui` (Streamlit dashboard), and `clipper scheduler` (posting loop).
+The processes are `clipper ui` (Streamlit dashboard) and the `clipper run` pipeline it spawns. `clipper sounds refresh` updates the trending sounds list.
 Stages pass data **only through `workspace/jobs/<job_id>/manifest.json`**. That file follows the `Job` model in `clipper/models.py`. Each stage reads the manifest, does its work, fills in its own fields, updates `status`, and writes the manifest back. No stage imports another stage's internals.
 
 ```
@@ -36,7 +37,7 @@ workspace/clipper.db # post queue (Post model). Only clipper/publish touches it.
 - Stay inside your own folders. If you need a change in a shared file, keep it to a small PR of its own and tell the other person.
 - **Changing `clipper/models.py` breaks the other person's work.** Only add optional fields. Never rename or remove a field without agreeing first. Update `tests/fixtures/sample_manifest.json` in the same PR.
 - Dev B doesn't need to wait for Dev A. Build and test against `tests/fixtures/sample_manifest.json`, `sample_transcript.json`, and any short mp4.
-- **`DRY_RUN=true` is the default and must stay that way in code.** Never write code that posts to a real account unless `config.DRY_RUN` is False, and never flip the default.
+- **Nothing posts automatically in Phase 1.** Don't add code that uploads to TikTok or Instagram, or a background posting loop, without an ARCHITECTURE.md change first (D18).
 
 ## Git workflow
 - `main` must always run. **Never commit directly to `main`.**
@@ -52,9 +53,11 @@ workspace/clipper.db # post queue (Post model). Only clipper/publish touches it.
 - `uv sync`: install dependencies
 - `uv run clipper run <url_or_file>`: pipeline up to render (ready for review)
 - `uv run clipper stage <ingest|analyze|captions|render> <job_id> [--force]`: run one stage
-- `uv run clipper ui` / `uv run clipper scheduler`: dashboard / posting loop (Dev B adds these)
+- `uv run clipper ui`: the dashboard (submit, review, post kit, sounds)
+- `uv run clipper sounds refresh` / `uv run clipper sounds list`: update / show the trending sounds
+- `uv run clipper resume <job_id>`: retry a failed job, skipping finished steps
 - `uv run pytest`: tests. `uv run ruff check . --fix && uv run ruff format .`: lint and format
-- Libraries: `yt-dlp` (download), `faster-whisper` (transcription), `scenedetect` (scene cuts), `ffmpeg` via `subprocess` (all video work, no moviepy), `anthropic` (LLM), `httpx` (platform APIs), `typer` (CLI), `pydantic` (models), `streamlit` (dashboard), `sqlite3` (post queue, stdlib).
+- Libraries: `yt-dlp` (download), `faster-whisper` (transcription), `scenedetect` (scene cuts), `ffmpeg` via `subprocess` (all video work, no moviepy), `anthropic` (LLM), `httpx` (fetching trending-sound pages), `pyperclip` (post kit clipboard), `typer` (CLI), `pydantic` (models), `streamlit` (dashboard), `sqlite3` (post queue, stdlib).
 - LLM: use the Anthropic SDK with the model from `config.py` (default `claude-opus-5-5`). **Always call Claude through `clipper.llm.ask_json`** (structured output plus pydantic validation, retry, refusal fallback). Never create your own client.
 
 ## Code conventions
@@ -67,8 +70,8 @@ workspace/clipper.db # post queue (Post model). Only clipper/publish touches it.
 
 ## Hard rules from the design (full detail is in docs/ARCHITECTURE.md)
 - **Never burn copyrighted or "trending" songs into the video file.** The default audio is the original game audio. Trending sounds get added by hand in the TikTok app, and captions only *suggests* one from `trending_sounds.yaml`.
-- **Phase 1 posting is manual-assisted (`POST_MODE=manual`, D18).** There are no TikTok or Instagram APIs. The dashboard's post kit prepares everything and a human posts. Never add browser automation that fills in upload pages. Auto-posting (Upload-Post API) is a stretch item behind `POST_MODE=auto`.
-- **Never retry an upload that might already have succeeded.** A stuck `uploading` row becomes `needs_check`. The `UNIQUE(job_id, clip_id, platform)` constraint must stay.
+- **Phase 1 posting is manual-assisted (D18).** There are no TikTok or Instagram APIs. The dashboard's post kit prepares everything and a human posts. Never add browser automation that fills in upload pages. Auto-posting (Upload-Post API) is a stretch item.
+- The `UNIQUE(job_id, clip_id, platform)` constraint in the post queue must stay: it stops a clip from being queued twice on one platform.
 - Only post clips with `review == approved`, unless `AUTO_APPROVE=true`.
 - Every LLM call validates its output with a pydantic model and has a non-LLM fallback, so the pipeline never dies because of Claude output.
 - On Windows, ffmpeg's `subtitles=` filter breaks on absolute paths. Run ffmpeg with `cwd=` set to the clip folder and pass a relative `.ass` filename.

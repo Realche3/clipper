@@ -1,4 +1,4 @@
-"""Final post text per platform. Shared by the clients and the dashboard's copy button."""
+"""Final post text per platform, used by the post kit (copy button + clipboard)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def post_text(job: Job, clip: Clip, platform: Platform) -> str:
         if job.credit:
             text += f"\n🎥 {job.credit}"
         return text
-    # TikTok: one block, pasted by hand in the app (inbox uploads can't carry a caption)
+    # TikTok: one block, pasted into the caption box when posting
     text = " ".join(p for p in (caption, tags) if p)
     if job.credit:
         text += f" 🎥 {job.credit}"

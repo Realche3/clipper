@@ -12,7 +12,7 @@ from clipper import config
 from clipper.models import Job, JobStatus
 
 app = typer.Typer(help="YouTube -> vertical clips -> TikTok/IG")
-STAGES = ["ingest", "analyze", "captions", "render"]  # publish runs via the scheduler
+STAGES = ["ingest", "analyze", "captions", "render"]  # posting happens from the dashboard
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -88,41 +88,43 @@ def ui() -> None:
     app_file = Path(__file__).parent / "ui" / "app.py"
     subprocess.run(
         [sys.executable, "-m", "streamlit", "run", str(app_file)]
-        # localhost only: the dashboard can approve posts, so don't expose it on the network
+        # localhost only: the dashboard opens files and edits the queue, so keep it off the network
         + ["--server.address", "localhost", "--browser.gatherUsageStats", "false"],
         cwd=config.ROOT,
         check=False,
     )
 
 
-@app.command("scheduler")
-def scheduler_cmd(
-    once: bool = typer.Option(False, "--once", help="Run a single tick and exit."),
-) -> None:
-    """Post queued clips when they're due. Uses the dry-run client unless DRY_RUN=false."""
-    from clipper.publish import queue
-    from clipper.publish import scheduler as sched
-    from clipper.publish.clients import make_clients
+sounds_app = typer.Typer(help="Trending sounds suggested for each clip.")
+app.add_typer(sounds_app, name="sounds")
 
-    config.WORKSPACE.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(config.WORKSPACE / "scheduler.log", encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logging.getLogger().addHandler(handler)
+
+@sounds_app.command("refresh")
+def sounds_refresh() -> None:
+    """Fetch the current trending TikTok / Reels sounds from TRENDING_SOURCES."""
+    from clipper.sounds.fetch import SoundsError, refresh
 
     try:
-        clients = make_clients(queue.enabled_platforms())
-    except (NotImplementedError, queue.EnqueueError) as e:
-        typer.echo(f"can't start scheduler: {e}", err=True)
+        data = refresh()
+    except SoundsError as e:
+        typer.echo(f"refresh failed: {e}", err=True)
         raise typer.Exit(1) from e
+    for src in data.sources:
+        typer.echo(f"  {src.count:>3}  {src.url}" + (f"  ({src.error})" if src.error else ""))
+    typer.echo(f"{len(data.sounds)} trending sounds saved to {config.TRENDING_SOUNDS_JSON}")
 
-    conn = queue.connect()
-    if once:
-        typer.echo(f"processed {sched.run_once(conn, clients)} post(s)")
-        return
-    try:
-        sched.run_forever(conn, clients)
-    except KeyboardInterrupt:
-        typer.echo("scheduler stopped")
+
+@sounds_app.command("list")
+def sounds_list() -> None:
+    """Show the sounds Claude picks from (pinned first)."""
+    from clipper.sounds.store import all_sounds, load_fetched
+
+    fetched = load_fetched()
+    when = f"{fetched.fetched_at:%b %d %H:%M}" if fetched and fetched.fetched_at else "never"
+    sounds = all_sounds()
+    typer.echo(f"{len(sounds)} sounds (last refresh: {when})")
+    for i, s in enumerate(sounds, start=1):
+        typer.echo(f"{i:>4}. {s.label}  [{s.platform}, {s.vibe}]")
 
 
 if __name__ == "__main__":
