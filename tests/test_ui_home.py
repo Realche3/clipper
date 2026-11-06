@@ -123,3 +123,92 @@ def test_review_badges_follow_clip_state(job):
     assert "Approved" in text and "Rejected" in text and "To review" in text
     clip = Job.load(config.WORKSPACE, "j1").clip("c03")
     assert clip.review == ReviewStatus.pending
+
+
+# ---------------------------------------------------------------- last UI round
+
+
+def test_set_sound_and_clear(job):
+    actions.set_sound("j1", "c01", " Vogue — Madonna ")
+    assert Job.load(config.WORKSPACE, "j1").clip("c01").suggested_sound == "Vogue — Madonna"
+    actions.set_sound("j1", "c01", None)
+    assert Job.load(config.WORKSPACE, "j1").clip("c01").suggested_sound is None
+
+
+def test_bulk_approve_and_reject(job):
+    actions.reject("j1", "c01")
+    assert actions.approve_all("j1") == 2  # c02, c03; c01 stays rejected
+    reviews = {c.id: c.review for c in Job.load(config.WORKSPACE, "j1").clips}
+    assert reviews == {
+        "c01": ReviewStatus.rejected,
+        "c02": ReviewStatus.approved,
+        "c03": ReviewStatus.approved,
+    }
+    assert actions.reject_rest("j1") == 0
+
+
+def test_posting_streak(job, monkeypatch):
+    from datetime import date
+
+    actions.approve_all("j1")
+    conn = queue.connect()
+    ids = [r["id"] for r in conn.execute("SELECT id FROM posts ORDER BY id")]
+    for post_id, days_ago in zip(ids, (0, 1, 2, 4), strict=False):
+        when = (datetime(2026, 11, 19, 12) - timedelta(days=days_ago)).isoformat()
+        conn.execute(
+            "UPDATE posts SET status='published', updated_at=? WHERE id=?", (when, post_id)
+        )
+    conn.close()
+    assert actions.posting_streak(date(2026, 11, 19)) == 3
+    assert actions.posting_streak(date(2026, 11, 20)) == 3  # nothing yet today: still counts
+    assert actions.posting_streak(date(2026, 11, 22)) == 0
+
+
+def test_week_strip_has_seven_days(job):
+    actions.approve("j1", "c01")
+    strip = actions.week_strip()
+    assert len(strip) == 7 and strip[0][0] == datetime.now().date()
+    assert sum(len(p) for _, p in strip) == 2  # tiktok + instagram
+
+
+def test_reveal_clip(job, monkeypatch):
+    seen = []
+    monkeypatch.setattr(actions.subprocess, "Popen", lambda cmd, **k: seen.append(cmd))
+    actions.reveal_clip("j1", "c01")
+    assert seen and str(job.clips[0].file) in " ".join(seen[0])
+
+
+def test_jobs_page_new_controls(job):
+    from clipper.sounds.store import Sound, SoundsFile, save_fetched
+
+    save_fetched(SoundsFile(fetched_at=datetime.now(), sounds=[Sound(title="Vogue", artist="M")]))
+    at = run_app("Jobs")
+    assert not at.exception
+    keys = {b.key for b in at.button}
+    assert {"preview-j1-c01", "reveal-j1-c01", "use-sound-j1-c01", "approve-all-j1"} <= keys
+    assert any("/150" in m.value for m in at.markdown)
+
+    at.selectbox(key="sound-j1-c01").set_value("Vogue — M").run()
+    at.button(key="use-sound-j1-c01").click().run()
+    assert not at.exception
+    assert Job.load(config.WORKSPACE, "j1").clip("c01").suggested_sound == "Vogue — M"
+
+    at.button(key="approve-all-j1").click().run()
+    assert not at.exception
+    assert all(c.review == ReviewStatus.approved for c in Job.load(config.WORKSPACE, "j1").clips)
+
+
+def test_preview_dialog_opens(job):
+    at = run_app("Jobs")
+    at.button(key="preview-j1-c01").click().run()
+    assert not at.exception
+
+
+def test_sounds_surprise_me():
+    from clipper.sounds.store import Sound, SoundsFile, save_fetched
+
+    save_fetched(SoundsFile(fetched_at=datetime.now(), sounds=[Sound(title="Vogue", artist="M")]))
+    at = run_app("Sounds")
+    at.button(key="surprise").click().run()
+    assert not at.exception
+    assert at.session_state["surprise-pick"] == "Vogue — M"

@@ -5,7 +5,9 @@ Rendering only: every action lives in clipper/ui/actions.py. Theme: .streamlit/c
 
 from __future__ import annotations
 
-from collections import defaultdict
+import html
+import random
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -60,6 +62,24 @@ h1.clipper-title {
 .hook {font-size: 1.05rem; font-weight: 700; line-height: 1.3; margin: .2rem 0 .4rem;}
 .step {color: #9A9AA8; font-size: .9rem;}
 .step b {color: #F2F2F5;}
+.phone {
+  border-radius: 22px; padding: 18px 18px 14px; margin-bottom: .8rem;
+  background: linear-gradient(180deg, #1d1d27 0%, #0d0d12 100%);
+  border: 1px solid #2b2b38; box-shadow: 0 10px 30px #0008; line-height: 1.4;
+}
+.phone.instagram {background: linear-gradient(180deg, #2a1730 0%, #0d0d12 100%);}
+.phone .hookline {font-weight: 800; font-size: 1.15rem; margin-bottom: .8rem;}
+.phone .who {font-weight: 700; margin-bottom: .2rem;}
+.phone .cap {font-size: .95rem;}
+.phone .tag {color: #25F4EE; font-weight: 600;}
+.phone.instagram .tag {color: #C9A7FF;}
+.phone .credit {color: #9A9AA8; font-size: .85rem; margin-top: .2rem;}
+.phone .snd {margin-top: .6rem; font-size: .9rem; color: #F2F2F5; opacity: .9;}
+.phone .actions {margin-top: .6rem; letter-spacing: .4rem; opacity: .8;}
+[role="dialog"] video {max-height: 70vh;}
+.day {text-align: center; line-height: 1.25;}
+.day .n {font-size: 1.6rem; font-weight: 800;}
+.day .d {color: #9A9AA8; font-size: .8rem;}
 </style>
 """
 
@@ -136,6 +156,13 @@ def page_home() -> None:
     c2.metric("🔔 Due to post", o.due, border=True)
     c3.metric("✅ Posted (7 days)", o.posted_week, border=True)
     c4.metric("💸 Claude (7 days)", f"${o.spend_week:.2f}", border=True)
+    streak = actions.posting_streak()
+    if streak >= 2:
+        st.markdown(f"🔥 **{streak}-day posting streak.** Keep it going!")
+    elif streak == 1:
+        st.markdown("🔥 **You posted today.** Post again tomorrow to start a streak.")
+    else:
+        st.caption("🔥 No posting streak yet. Post a clip today to start one.")
 
     st.markdown("#### What's next")
     todo = []
@@ -243,13 +270,20 @@ def page_jobs() -> None:
         st.code(actions.log_tail(job_id, 40) or "(no log)", language=None)
         return
 
-    head, filt = st.columns([3, 2], vertical_alignment="bottom")
+    head, bulk, filt = st.columns([5, 1, 2], vertical_alignment="bottom")
     with head:
         st.markdown(f"#### {job.title or job.source_url}")
         st.caption(
             f"{job.channel or ''} · {len(job.clips)} clips"
             + (f" · your note: {_short(job.context)}" if job.context else "")
         )
+    pending = sum(1 for c in job.clips if c.review == ReviewStatus.pending)
+    with bulk.popover("⚡ Bulk", use_container_width=True, disabled=not pending):
+        st.caption(f"{pending} clip(s) still to review")
+        if st.button(f"✅ Approve all {pending}", key=f"approve-all-{job_id}", type="primary"):
+            _do(actions.approve_all, job_id, ok=f"Approved {pending} clips")
+        if st.button(f"🚫 Reject the {pending} left", key=f"reject-rest-{job_id}"):
+            _do(actions.reject_rest, job_id, ok=f"Rejected {pending} clips")
     with filt:
         show = st.segmented_control(
             "Show",
@@ -314,10 +348,13 @@ def clip_card(job_id: str, clip_id: str) -> None:
 
         caption = st.text_area("Caption", clip.caption or "", key=f"cap-{key}", height=90)
         tags = st.text_input("Hashtags", " ".join(clip.hashtags), key=f"tags-{key}")
+        st.markdown(counters(caption, tags))
         if clip.suggested_sound:
             st.markdown(
                 f"🎵 **{clip.suggested_sound}** · [find it]({search_url(clip.suggested_sound)})"
             )
+        else:
+            st.caption("🎵 No sound picked")
 
         changed = caption != (clip.caption or "") or tags != " ".join(clip.hashtags)
         b1, b2 = st.columns(2)
@@ -343,6 +380,13 @@ def clip_card(job_id: str, clip_id: str) -> None:
             _do(actions.save_copy, job_id, clip_id, caption, tags, ok="Saved")
         with b4.popover("✂️ Edit clip", use_container_width=True):
             edit_form(job, clip, key, locked)
+        b5, b6, b7 = st.columns(3)
+        if b5.button("📱", key=f"preview-{key}", width="stretch", help="Preview the post"):
+            phone_preview(job_id, clip_id)
+        if b6.button("📂", key=f"reveal-{key}", width="stretch", help="Show the file"):
+            _do(actions.reveal_clip, job_id, clip_id, ok="File shown", rerun=False)
+        with b7.popover("🎵", use_container_width=True, help="Change the sound"):
+            sound_picker(job_id, clip, key)
 
         for post in clip_posts:
             if post.status == PostStatus.published:
@@ -352,6 +396,81 @@ def clip_card(job_id: str, clip_id: str) -> None:
             st.caption(
                 f"{PLATFORM_ICON[post.platform]} {actions.PLATFORM_LABEL[post.platform]}: {when}"
             )
+
+
+CAPTION_LIMIT = 150
+
+
+def counters(caption: str, tags: str) -> str:
+    n = len(caption.strip())
+    n_tags = len(actions.parse_hashtags(tags))
+    cap = (
+        f":green-badge[✍️ {n}/{CAPTION_LIMIT}]"
+        if n <= CAPTION_LIMIT
+        else f":red-badge[✍️ {n}/{CAPTION_LIMIT} too long]"
+    )
+    tag = (
+        f":green-badge[# {n_tags} tags]" if 3 <= n_tags <= 8 else f":orange-badge[# {n_tags} tags]"
+    )
+    return f"{cap} {tag}"
+
+
+def sound_picker(job_id: str, clip, key: str) -> None:
+    sounds, _ = actions.sounds_overview()
+    labels = [s.label for s in sounds]
+    if not labels:
+        st.caption("No trending sounds yet. Refresh them on the Sounds page.")
+        return
+    current = clip.suggested_sound if clip.suggested_sound in labels else None
+    choice = st.selectbox(
+        "Pick a trending sound",
+        labels,
+        index=labels.index(current) if current else None,
+        placeholder="Search songs or artists...",
+        key=f"sound-{key}",
+    )
+    if choice:
+        st.markdown(f"[find it on TikTok ↗]({search_url(choice)})")
+    if st.button(
+        "Use this sound",
+        key=f"use-sound-{key}",
+        type="primary",
+        disabled=not choice or choice == clip.suggested_sound,
+        width="stretch",
+    ):
+        _do(actions.set_sound, job_id, clip.id, choice, ok="Sound updated")
+
+
+@st.dialog("📱 How it will look", width="large")
+def phone_preview(job_id: str, clip_id: str) -> None:
+    job, clip = actions.load_clip(job_id, clip_id)
+    video, side = st.columns([2, 3])
+    with video:  # one player; the tabs only switch the post text
+        if clip.file and clip.file.exists():
+            st.video(str(clip.file), autoplay=True, muted=True, loop=True)
+    with side:
+        tabs = st.tabs([f"{PLATFORM_ICON[p]} {actions.PLATFORM_LABEL[p]}" for p in Platform])
+        for tab, platform in zip(tabs, Platform, strict=True):
+            with tab:
+                st.markdown(phone_card(job, clip, platform), unsafe_allow_html=True)
+                st.code(post_text(job, clip, platform), language=None, wrap_lines=True)
+
+
+def phone_card(job, clip, platform: Platform) -> str:
+    caption = html.escape(clip.caption or clip.title or "")
+    tags = " ".join(f"<span class='tag'>{html.escape(t)}</span>" for t in clip.hashtags)
+    sound = html.escape(clip.suggested_sound or "original sound")
+    credit = f"<div class='credit'>🎥 {html.escape(job.credit)}</div>" if job.credit else ""
+    name = "@you" if platform == Platform.tiktok else "you"
+    return f"""
+<div class="phone {platform.value}">
+  <div class="hookline">“{html.escape(clip.hook_text or "")}”</div>
+  <div class="who">{name}</div>
+  <div class="cap">{caption} {tags}</div>
+  {credit}
+  <div class="snd">♫ {sound}</div>
+  <div class="actions">❤️ 💬 ↗️</div>
+</div>"""
 
 
 def edit_form(job, clip, key: str, locked: bool) -> None:
@@ -414,6 +533,17 @@ def queue_view() -> None:
             post_kit(p)
 
     with tab_next:
+        week = st.columns(7)
+        for col, (day, day_posts) in zip(week, actions.week_strip(now), strict=True):
+            per = Counter(p.platform for p in day_posts)
+            icons = " · ".join(f"{PLATFORM_ICON[pl]} {n}" for pl, n in per.items()) or "·"
+            name = "Today" if day == now.date() else f"{day:%a}"
+            with col.container(border=True):
+                st.markdown(
+                    f"<div class='day'><div class='d'>{name} {day:%d}</div>"
+                    f"<div class='n'>{len(day_posts)}</div><div>{icons}</div></div>",
+                    unsafe_allow_html=True,
+                )
         by_day = defaultdict(list)
         for p in upcoming:
             by_day[p.scheduled_at.date()].append(p)
@@ -516,18 +646,35 @@ def page_sounds() -> None:
         st.info("No sounds yet. Click **Refresh now**.")
         return
 
-    f1, f2, f3 = st.columns([3, 4, 3])
+    lucky, pick = st.columns([1, 4], vertical_alignment="center")
+    if lucky.button("🎲 Surprise me", key="surprise", width="stretch"):
+        st.session_state["surprise-pick"] = random.choice(sounds).label
+    if chosen := st.session_state.get("surprise-pick"):
+        s = next((x for x in sounds if x.label == chosen), None)
+        if s:
+            pick.markdown(
+                f"#### {VIBE_ICON.get(s.vibe, '🎵')} {s.label}  "
+                f":gray-badge[{s.platform}] [search ↗]({search_url(s.label)})"
+            )
+
+    by_platform = Counter(s.platform for s in sounds)
+    by_vibe = Counter(s.vibe for s in sounds)
+    f1, f2 = st.columns([2, 3])
     platforms = f1.pills(
-        "Platform", ["tiktok", "instagram", "both"], selection_mode="multi", key="snd-platform"
+        "Platform",
+        ["tiktok", "instagram", "both"],
+        selection_mode="multi",
+        format_func=lambda p: f"{p} ({by_platform.get(p, 0)})",
+        key="snd-platform",
     )
     vibes = f2.pills(
         "Vibe",
         list(VIBE_ICON),
         selection_mode="multi",
-        format_func=lambda v: f"{VIBE_ICON[v]} {v}",
+        format_func=lambda v: f"{VIBE_ICON[v]} {v} ({by_vibe.get(v, 0)})",
         key="snd-vibe",
     )
-    query = f3.text_input("Search", placeholder="song or artist", key="snd-q").strip().lower()
+    query = st.text_input("Search", placeholder="song or artist", key="snd-q").strip().lower()
     shown = [
         s
         for s in sounds
