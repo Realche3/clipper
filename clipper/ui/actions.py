@@ -394,6 +394,43 @@ def refresh_sounds() -> int:
         raise ActionError(str(e)) from e
 
 
+@dataclass
+class Overview:
+    to_review: int  # clips in rendered jobs still pending review
+    due: int
+    posted_week: int
+    spend_week: float
+    running: int  # jobs still in the pipeline
+    sounds_stale: bool
+
+
+SOUNDS_STALE_AFTER = timedelta(days=3)
+
+
+def overview(now: datetime | None = None) -> Overview:
+    now = now or datetime.now()
+    rows = list_jobs()
+    to_review = sum(
+        1
+        for r in rows
+        if r.job and r.job.status == JobStatus.rendered
+        for c in r.job.clips
+        if c.review == ReviewStatus.pending
+    )
+    running = sum(1 for r in rows if not is_finished(r))
+    week_ago = now - timedelta(days=7)
+    posted_week = sum(1 for p in posts(PostStatus.published) if p.updated_at >= week_ago)
+    _, fetched_at = sounds_overview()
+    return Overview(
+        to_review=to_review,
+        due=len(due_now(now)),
+        posted_week=posted_week,
+        spend_week=llm.spend_since(week_ago),
+        running=running,
+        sounds_stale=fetched_at is None or now - fetched_at > SOUNDS_STALE_AFTER,
+    )
+
+
 def claude_spend() -> tuple[float, float]:
     """Estimated Claude API spend (today, last 7 days) from workspace/claude_usage.jsonl."""
     rows = llm.load_usage()
