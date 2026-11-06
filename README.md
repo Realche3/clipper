@@ -10,9 +10,7 @@ Read [CLAUDE.md](CLAUDE.md) first. Claude Code loads it automatically.
 3. `cp .env.example .env` and fill in your keys.
 4. `uv run pytest`
 
-## Do these today (approval takes days)
-- [ ] **TikTok:** create an app at developers.tiktok.com, add *Content Posting API*, and **submit it for audit now**. Until it's audited, posts can only be private, so we use draft/inbox upload for now.
-- [ ] **Instagram:** switch the IG account to a Professional (Creator) account, then create a Meta app using "Instagram API with Instagram Login" and the `instagram_business_content_publish` permission. You can test your own account in dev mode, and no Facebook Page is needed.
+## Before you start
 - [ ] Get an Anthropic API key.
 
 ## Plan

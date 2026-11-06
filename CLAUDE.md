@@ -5,7 +5,7 @@ Two people build this repo by vibe-coding with Claude Code. Read this whole file
 **Work is split into tasks in [docs/TASKS.md](docs/TASKS.md).** When asked to "do task X", follow that task's spec and its *Done when* line. Stay inside its folders and tick its checkbox in the same PR. Dev A is the friend (engine). Dev B is the repo owner (distribution).
 
 ## What we're building
-A tool that takes a YouTube link, cuts it into several vertical short clips (9:16, 15–60s), writes a caption and hashtags for each clip, and posts them to TikTok and Instagram Reels on a schedule. It targets GTA 6 gaming content, and **the deadline is the GTA 6 launch (Nov 19, 2026)**. Shipping beats polish. Only build what the pipeline needs.
+A tool that takes a YouTube link, cuts it into several vertical short clips (9:16, 15–60s), writes a caption and hashtags for each clip, suggests a trending sound, and makes posting them to TikTok and Instagram Reels nearly one click. It targets GTA 6 gaming content, and **the deadline is the GTA 6 launch (Nov 19, 2026)**. **Phase 1** = the two of us run it locally for our own accounts. **Phase 2** = a SaaS for other creators, after launch (ARCHITECTURE.md §13). Shipping beats polish. Only build what the pipeline needs.
 
 ## Pipeline (each stage is a separate module)
 ```
@@ -67,7 +67,7 @@ workspace/clipper.db # post queue (Post model). Only clipper/publish touches it.
 
 ## Hard rules from the design (full detail is in docs/ARCHITECTURE.md)
 - **Never burn copyrighted or "trending" songs into the video file.** The default audio is the original game audio. Trending sounds get added by hand in the TikTok app, and captions only *suggests* one from `trending_sounds.yaml`.
-- **TikTok uses the inbox/draft upload (`FILE_UPLOAD`)**, and a human finishes the post in the app. Instagram uses the Instagram Login API with Reels resumable upload and publishes automatically.
+- **Phase 1 posting is manual-assisted (`POST_MODE=manual`, D18).** There are no TikTok or Instagram APIs. The dashboard's post kit prepares everything and a human posts. Never add browser automation that fills in upload pages. Auto-posting (Upload-Post API) is a stretch item behind `POST_MODE=auto`.
 - **Never retry an upload that might already have succeeded.** A stuck `uploading` row becomes `needs_check`. The `UNIQUE(job_id, clip_id, platform)` constraint must stay.
 - Only post clips with `review == approved`, unless `AUTO_APPROVE=true`.
 - Every LLM call validates its output with a pydantic model and has a non-LLM fallback, so the pipeline never dies because of Claude output.

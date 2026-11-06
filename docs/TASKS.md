@@ -14,8 +14,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 ---
 
 ## Day 0: today (Nov 4)
-- [ ] **Dev B:** create the TikTok developer app, add Content Posting API (`video.upload` scope), and submit it for audit
-- [ ] **Dev B:** switch the IG account to Creator, then create a Meta app with Instagram Login and `instagram_business_content_publish`
+- ~~Dev B: create TikTok and Meta developer apps~~ (not needed: Phase 1 posting is manual-assisted, D18)
 - [ ] **Dev B:** get an Anthropic API key and share it with Dev A privately (not in git)
 - [ ] **Both:** install Python 3.11+, uv, and FFmpeg. Clone, `uv sync`, `uv run pytest` should be green.
 
@@ -52,8 +51,8 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 | B2 | Captions | `b/captions` | Nov 6 | B1 |
 | B3 | Post queue + slots | `b/queue` | Nov 7 | — |
 | B4 | DryRun client + scheduler | `b/scheduler` | Nov 8 | B3 |
-| B5 | TikTok auth + inbox upload | `b/tiktok` | Nov 9 | B4, TikTok app |
-| B6 | Instagram auth + Reels upload | `b/instagram` | Nov 10 | B4, Meta app |
+| B5 | Post kit (manual-assisted posting) | `b/post-kit` | Nov 8 | B4, B8 |
+| B6 | Trending sounds fetch + Claude pick | `b/sounds` | Nov 9 | B2 |
 | B7 | Dashboard v1 | `b/ui` | Nov 11 | B3 |
 | B8 | Dashboard v2: edit → re-render | `b/ui-edit` | Nov 13–14 | B7, A5 |
 
@@ -61,8 +60,10 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 - [x] **B2 Captions** (`clipper/captions`): one Claude call per job. Fills in `hook_text`, `title`, `caption`, `hashtags` (+ `BASE_HASHTAGS`), `vibe`, and `suggested_sound` from `trending_sounds.yaml`. Fallback: the video title plus base hashtags. Leaves `status=captioned`. Test it on `tests/fixtures/sample_manifest.json`.
 - [x] **B3 Queue + slots** (`publish/queue.py`, `publish/slots.py`): SQLite `posts` table with `UNIQUE(job_id, clip_id, platform)`. `enqueue(job, clip)` adds one row per enabled platform. `next_slot()` respects the interval, posting window, and daily cap. **Unit tests for the slotting.**
 - [x] **B4 Scheduler** (`publish/scheduler.py`, `publish/dryrun.py`): a loop every 60s that claims due rows with `scheduled→uploading`, calls the client, and records the result. Retries at 5, 15, and 45 min. A row stuck for more than 15 min becomes `needs_check`. Use `DryRunClient` whenever `DRY_RUN=true`. Add the `clipper scheduler` command.
-- [ ] **B5 TikTok** (`publish/tiktok.py`, `publish/auth.py`): `clipper auth tiktok` runs the OAuth flow once and saves tokens to `secrets/tokens.json` with auto-refresh. Upload via inbox `FILE_UPLOAD` as a single chunk, which leaves `uploaded_draft`.
-- [ ] **B6 Instagram** (`publish/instagram.py`): `clipper auth instagram` gets a long-lived token and refreshes it. Flow: Reels container (`upload_type=resumable`), upload the local file, poll the status, publish. The caption is caption + hashtags + credit. Saves `remote_id` and `url`.
+- [ ] **B5 Post kit** (`clipper/ui`, `publish/`; ARCHITECTURE.md §5.6): `POST_MODE=manual` (default) in config. The Queue page gets a **Due now** section. Each post has a **Start posting** button that copies the platform text to the clipboard, reveals the clip in Explorer/Finder and opens the upload page, plus the suggested sound with a search link and **Mark as posted** (also from `scheduled`). `clipper scheduler` refuses to start in manual mode.
+  *Done when:* approve a clip, it shows as due at its slot, one click prepares everything, and Mark as posted moves it to Posted.
+- [ ] **B6 Trending sounds** (`clipper/sounds`; ARCHITECTURE.md §5.7): `clipper sounds refresh` fetches each page in `TRENDING_SOURCES`, has Claude extract `{title, artist, platform, vibe}`, and merges with `trending_sounds.yaml` into `workspace/trending_sounds.json`. Captions passes the list to Claude to pick a sound per clip. The dashboard gets a Sounds page with a Refresh button and the date of the last update.
+  *Done when:* a real refresh returns 100+ sounds, and a new job's clips get suggestions from that list.
 - [x] **B7 Dashboard v1** (`clipper/ui/app.py`, `clipper ui` command):
   - Paste a URL plus an optional **context note** ("what is this video about?") to spawn `clipper run --context ...` as a subprocess. Show the job list with status.
   - Clip grid with a video player, approve/reject, and editable caption and hashtags.

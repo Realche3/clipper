@@ -1,6 +1,6 @@
 # Clipper: Architecture, Decisions & Scope
 
-Status: **v1 design, agreed before coding starts.** If you want to change a decision, open a PR that edits this file first.
+Status: **v1 design. Nov 6 update: Phase 1 posting is manual-assisted (D18), trending sounds are fetched (D19), and Phase 2 is a SaaS (§13).** If you want to change a decision, open a PR that edits this file first.
 
 Dates: today is Nov 4, 2026, **GTA 6 launches Nov 19**, and code freezes Nov 17.
 
@@ -14,8 +14,8 @@ The MVP is done when all of these hold:
 1. Paste a YouTube URL and get 5 clips: 1080x1920, 15–60s, burned-in subtitles, and a hook line on screen.
 2. Every clip has a title, a caption, and hashtags.
 3. A human approves or rejects clips in a dashboard and can tweak the caption, hook, or trim.
-4. Approved clips are posted on a schedule: **Instagram fully automatic, TikTok as a draft in the app.**
-5. Nothing is ever posted twice, and nothing is posted when `DRY_RUN=true`.
+4. Approved clips get a suggested posting time and a **post kit**: one click copies the caption, shows the file and opens the TikTok or Instagram upload page. A human finishes the post (D18).
+5. A clip is never queued twice on the same platform, and the dashboard shows what's been posted.
 
 ## 2. Scope
 
@@ -25,30 +25,32 @@ The MVP is done when all of these hold:
 | Input | YouTube URL. One video per job, ≤ 90 min. |
 | Highlight detection | Audio loudness, scene cuts, and speech reactions give candidate moments. Claude picks the final clips and sets their start and end. |
 | Render | 9:16 blurred-background layout, word-by-word subtitles, hook text for the first 3s, loudness normalized. |
-| Copy | Claude writes the hook, title, caption, and hashtags. A suggested trending sound comes from a hand-kept list. |
+| Copy | Claude writes the hook, title, caption, and hashtags, and picks a suggested sound from the fetched trending list (§5.7). |
 | Review | Streamlit dashboard: submit a URL, watch progress, preview clips, edit, approve or reject, re-render one clip. |
-| Publish | Instagram Reels via the Graph API (auto-publish). TikTok via the Content Posting API **inbox/draft** upload. |
-| Scheduling | Per-platform queue with spacing, posting window, daily cap, retries, and double-post protection. |
+| Publish | **Manual-assisted (`POST_MODE=manual`)**: a post kit per clip and platform (copy caption, show file, open upload page, suggested sound, mark as posted). No platform APIs. |
+| Scheduling | Per-platform queue with spacing, posting window and daily cap. In manual mode the times are reminders: the Queue page shows what's due now. |
+| Trending sounds | `clipper sounds refresh` fetches 100+ currently trending TikTok and Reels songs from public weekly roundups. Claude extracts them, and the dashboard can refresh the list. |
 
 ### Stretch (only after the MVP works end to end)
 - Facecam layout (manual crop preset per channel)
 - Royalty-free music mix (`MUSIC_MODE=library`)
 - YouTube Shorts upload
-- TikTok direct post, once the app audit passes
+- **Auto-posting (`POST_MODE=auto`)** through the Upload-Post API: one client for TikTok and Instagram that plugs into the existing scheduler. The scheduler, retries and `needs_check` are already built for it.
+- Phone share-sheet button (Web Share API) to send a clip straight into the TikTok or Instagram editor. Needs the dashboard on HTTPS, e.g. via a tunnel.
 - Claude vision ranking (send frames from each candidate)
 - Running on a VPS so the laptop can sleep
 
 ### Out of scope (we're not building these)
-Multiple accounts per platform · user logins or auth · analytics and the view-count feedback loop · automatic trending-sound detection (scraping) · a timeline editor · AI face tracking · microservices, Docker, Redis, Celery · cloud hosting for the MVP.
+Multiple accounts per platform · user logins or auth (Phase 2) · analytics and the view-count feedback loop · browser automation that fills in upload pages (against platform terms, and it risks bans) · a timeline editor · AI face tracking · microservices, Docker, Redis, Celery · cloud hosting for the MVP.
 
 ## 3. Platform reality (this shapes the design)
 
 | Constraint | Consequence for us |
 |---|---|
-| Neither API can attach in-app trending sounds. Burning copyrighted music into the file gets the video muted or the account struck. | Default audio is **the original game audio**. Trending sounds get added by hand in the TikTok app. |
-| TikTok: an unaudited app can only post privately. The **inbox upload** endpoint sends the video to the TikTok app, where you finish the post: sound, caption, publish. The inbox flow doesn't take a caption. | TikTok is **semi-automatic**. The dashboard shows a "copy caption" button and the suggested sound. Plan for about 1 min of phone work per TikTok post. |
-| TikTok upload: `FILE_UPLOAD` source, a single chunk when the file is < 64 MB. Access tokens last about 24h, refresh tokens much longer. | Clips are about 10–25 MB, so one PUT. Refresh the token automatically. |
-| Instagram: Instagram API with Instagram Login on a **Professional (Creator/Business) account**. Reels container → resumable upload of a local file → poll status → publish. | Fully automatic and no video hosting needed. Long-lived token (about 60 days), refreshed by us. |
+| No posting API can attach in-app trending sounds. Burning copyrighted music into the file gets the video muted or the account struck. | Default audio is **the original game audio**. The human adds the trending sound inside the TikTok or Instagram editor while posting. |
+| Our own TikTok and Meta API apps need reviews that take days, and an unaudited TikTok app can only post privately. | **Phase 1 uses no posting APIs** (D18). Posting is manual-assisted, which also lets the human use in-app trending sounds. |
+| A website can't push a video into the TikTok or Instagram apps or upload pages. Only phones can, through the share sheet, and only on HTTPS. | Desktop post kit: copy caption, reveal the file in Explorer/Finder, open the upload page, drag the file in. The phone share sheet is a stretch item. |
+| There's no official trending-audio API. TikTok's Creative Center chart needs a signed browser session. Public weekly roundups (Metricool, SocialPilot, HeyOrca) are plain HTML. | Fetch the roundups and have Claude extract `{title, artist, platform, vibe}`. The source list is configurable and is merged with the hand-kept `trending_sounds.yaml`. |
 | Platforms push down reposted, unchanged content ("unoriginal"). | Prefer our own gameplay or permitted sources. Always change the clip (crop, subtitles, hook) and credit the source. |
 | YouTube sometimes blocks yt-dlp ("confirm you're not a bot"). | Support `YTDLP_COOKIES_FROM_BROWSER`, and keep yt-dlp updated. |
 
@@ -114,18 +116,32 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 - `AUTO_APPROVE=true` skips the review step. It's off by default because a bad clip can hurt the account.
 
 ### 5.6 publish and schedule (Dev B)
+
+> **Phase 1 = `POST_MODE=manual` (D18).** Approving a clip still books a slot per platform, but the slot is a *reminder*. The Queue page lists posts that are **due now**, each with a post kit:
+> - **Start posting**: copies the platform-formatted text (`publish/text.py`) to the clipboard, reveals the clip file in Explorer/Finder, and opens the upload page (TikTok Studio upload / Instagram).
+> - The suggested sound, with a link that searches for it.
+> - **Mark as posted** (optional link): `scheduled` / `uploaded_draft` / `needs_check` → `published`.
+>
+> `clipper scheduler` refuses to start in manual mode, so nothing is ever "posted" by the DryRun client by mistake. The scheduler, retries and clients below stay for `POST_MODE=auto` (Stretch / Phase 2).
+
 - **Queue (`workspace/clipper.db`, table `posts`):** id, job_id, clip_id, platform, status, scheduled_at, attempts, remote_id, url, error, updated_at. UNIQUE(job_id, clip_id, platform), which is the double-post guard.
 - **Slotting:** the next free slot per platform, at least `POST_INTERVAL_MINUTES` after the previous one, inside `POSTING_WINDOW` (e.g. 10:00–23:30 local), under `DAILY_CAP_<PLATFORM>`. Otherwise it moves to the next day.
 - **Scheduler loop (every 60s):** claim due rows (`scheduled → uploading`, in one transaction), call the client, then set `published` / `uploaded_draft` or `failed`.
   - Retry with backoff (5, 15, then 45 min): up to 3 retries, 4 tries in total. A retry that falls outside the posting window moves to the next window start.
   - A row stuck in `uploading` for more than 15 min becomes `needs_check`. **We never retry blindly**, because that's how double posts happen.
 - **Clients:** they share one interface, `publish(job, clip) -> PostResult` (`publish/clients.py`). A client raises `PublishError(retryable=...)` only when it is **sure nothing went out**: retryable gets retried, otherwise the post is `failed`. Any other exception, including `UploadStateUnknown`, sends the post to `needs_check`.
-  - `TikTokClient`: inbox upload.
-  - `InstagramClient`: Reels resumable upload, then publish.
+  - `UploadPostClient` (auto mode, Stretch): one client for TikTok and Instagram through the Upload-Post API.
   - `DryRunClient`: logs only. It's used whenever `DRY_RUN=true`, which is **the default**.
 - **Instagram caption:** `caption + "\n\n" + hashtags + "\n🎥 " + credit`.
 - **TikTok:** the dashboard shows the caption and hashtags with a copy button, plus the suggested sound.
-- **Tokens:** stored in `secrets/tokens.json` (gitignored) and refreshed automatically before they expire. Set them up once with `clipper auth tiktok` and `clipper auth instagram`.
+
+### 5.7 trending sounds (Dev B)
+- `clipper sounds refresh`, or the **Refresh** button on the dashboard, downloads each page in `TRENDING_SOURCES` (weekly roundups of trending TikTok and Reels audio). It strips the HTML to text and makes one `ask_json` call per page to extract `[{title, artist, platform, vibe}]`.
+- Results are merged and deduped by (title, artist). Hand-pinned entries from `trending_sounds.yaml` come first. They're saved to `workspace/trending_sounds.json` with `fetched_at`.
+- A source that fails is logged and skipped, and the last good list is kept. The target is 100+ sounds.
+- **Captions:** Claude gets the current list (name, artist, platform, vibe) and picks the best fit for each clip. Fallback: a vibe-based pick, as before.
+- The dashboard shows the suggestion with a search link (`tiktok.com/search?q=<title> <artist>`), so finding it in the app takes one tap.
+- We only ever store **song names**, never audio.
 
 ## 6. Data and state
 
@@ -159,11 +175,13 @@ Rules:
 | D10 | Claude `claude-opus-5-5` at `medium` effort, through `llm.ask_json`: structured output, 1 retry, server-side refusal fallback, then a non-LLM fallback | Best judgment on taste. About 2 calls per job, costing cents. Switch models with `CLAUDE_MODEL`. | Local LLM (setup time, quality) |
 | D11 | Human review gate by default | One bad or offensive clip costs more than the minutes saved. | Full auto (available as `AUTO_APPROVE`) |
 | D12 | Original game audio by default. Trending sounds added in the TikTok app. | The APIs can't attach in-app sounds, and copyrighted audio gets muted or struck. | Burning songs into the file |
-| D13 | TikTok inbox/draft upload for the MVP | Works before the audit, and it's the only way to add a trending sound anyway. | Direct post (needs audit, still no trending sound) |
-| D14 | Instagram resumable local upload | No public video hosting needed | Hosting on S3/R2 with `video_url` |
+| D13 | ~~TikTok inbox/draft upload~~, replaced by D18 | — | — |
+| D14 | ~~Instagram resumable local upload~~, replaced by D18 | — | — |
 | D15 | Streamlit dashboard | Vibe-codes fast and has a built-in video player. It's only a viewer and editor over the files and the DB. | React/Tauri (too slow to build), CLI-only review |
 | D16 | `DRY_RUN=true` by default, with a DryRun client | Vibe-coding must never post to the real accounts by accident. | — |
 | D17 | Folder ownership per dev, and the shared contract changes only by agreement | Prevents merge conflicts and silent breakage between two AI-assisted devs | — |
+| D18 | **Phase 1 posting is manual-assisted** (`POST_MODE=manual`): a post kit, no platform APIs | No app reviews or OAuth, it works for any account today, and it allows in-app trending sounds. About 1 min per post. | Own TikTok/Meta apps (days of review, TikTok private-only until audit), Upload-Post API ($24/mo, kept as auto mode later), browser automation (against platform terms) |
+| D19 | Trending sounds come from public weekly roundups, extracted by Claude | No official API exists. Roundups are plain HTML and cover both platforms. Claude copes with changing page layouts. | TikTok Creative Center scraping (signed session), paid scrapers (Apify), a hand-kept list only (too small) |
 
 ## 8. Module layout
 
@@ -177,7 +195,8 @@ clipper/
   analyze/         # Dev A: transcribe.py, signals.py, candidates.py, rank.py
   render/          # Dev A: layout.py, subtitles.py (ASS), encode.py
   captions/        # Dev B: generate.py, sounds.py
-  publish/         # Dev B: queue.py, slots.py, scheduler.py, tiktok.py, instagram.py, dryrun.py, auth.py
+  publish/         # Dev B: queue.py, slots.py, scheduler.py, clients.py, dryrun.py, text.py, (uploadpost.py later)
+  sounds/          # Dev B: fetch.py (roundup pages -> Claude -> trending_sounds.json)
   ui/              # Dev B: Streamlit app.py
 tests/             # pure-function tests + fixture manifests, no network
 ```
@@ -207,20 +226,27 @@ tests/             # pure-function tests + fixture manifests, no network
 | After launch | Stretch list from section 2 | |
 
 ## 11. Launch-day runbook (Nov 19)
-1. The posting machine stays plugged in, with sleep disabled. Start `clipper scheduler` and `clipper ui`.
-2. Update `trending_sounds.yaml` in the morning.
-3. Feed in sources as they appear. Review, then approve the best 2–3 clips per video.
-4. When a TikTok draft notification arrives, finish it in the app: sound, paste caption, post.
-5. Check the dashboard queue every hour for `failed` or `needs_check` posts.
+1. Start `clipper ui`, then refresh the trending sounds (dashboard button or `clipper sounds refresh`).
+2. Feed in sources as they appear. Review, then approve the best 2–3 clips per video.
+3. When the Queue page shows a post as **due now**: Start posting → drag the file into the upload page → add the suggested sound → paste → post → Mark as posted.
 
 ## 12. Risks
 
 | Risk | Mitigation |
 |---|---|
-| TikTok audit not done by launch | The inbox flow works without the audit. That's already the plan. |
+| Roundup pages change or go stale | Several sources, Claude extraction instead of fixed selectors, the last good list is kept, and pinned songs come from `trending_sounds.yaml` |
+| Manual posting is slow on launch day | One-click post kit, about 1 min per post, and a daily cap keeps the volume sane |
 | YouTube blocks downloads | Cookies from the browser, `uv lock --upgrade-package yt-dlp` |
 | Whisper too slow | `base` model, CUDA if available, YouTube subtitles as a fallback |
 | Accounts flagged for reposting | Own or permitted sources, real changes to each clip, credit lines, a daily cap |
 | Double posts | UNIQUE constraint, a claim before upload, and `needs_check` instead of blind retries |
 | Laptop sleeps and the schedule stops | Disable sleep. Moving to a VPS is on the stretch list. |
 | The two devs break each other's code | The contract-change rule (D17), fixture tests in CI on every PR |
+
+## 13. Phase 2: SaaS (after launch, not designed yet)
+Goal: other creators use Clipper for their own accounts. Notes for when we get there:
+- **Hosting:** a web app plus a job queue and workers, with per-user storage for sources and clips. Processing costs (Claude, transcription, rendering) are per user.
+- **Auth:** user accounts. Every job, clip and post is scoped to a user.
+- **Posting:** keep the manual post kit for free users, and add auto-posting through a posting API (Upload-Post "profiles" map 1:1 to our users), or our own audited TikTok/Meta apps.
+- **Phone first:** a share-sheet button (Web Share API) once the app is on HTTPS.
+- **Content rights:** terms of use, and users confirm they have the right to clip each source.
