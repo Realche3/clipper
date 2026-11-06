@@ -13,12 +13,12 @@ import sys
 import uuid
 import webbrowser
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyperclip
 
-from clipper import config
+from clipper import config, llm
 from clipper.captions.generate import normalize_hashtag
 from clipper.models import Job, JobStatus, Platform, Post, PostStatus, ReviewStatus
 from clipper.publish import queue
@@ -232,6 +232,31 @@ def edit_clip(job_id: str, clip_id: str, hook_text: str, start: float, end: floa
         raise ActionError(f"Re-render failed; the previous version is kept.\n{tail}")
 
 
+def set_sound(job_id: str, clip_id: str, label: str | None) -> None:
+    """Swap the suggested sound (a label from the trending list), or clear it with None."""
+    job = _editable(job_id)
+    job.clip(clip_id).suggested_sound = (label or "").strip() or None
+    job.save(config.WORKSPACE)
+
+
+def approve_all(job_id: str) -> int:
+    """Approve every clip still waiting for review. Returns how many were approved."""
+    job = _editable(job_id)
+    pending = [c.id for c in job.clips if c.review == ReviewStatus.pending]
+    for clip_id in pending:
+        approve(job_id, clip_id)
+    return len(pending)
+
+
+def reject_rest(job_id: str) -> int:
+    """Reject every clip still waiting for review. Returns how many were rejected."""
+    job = _editable(job_id)
+    pending = [c.id for c in job.clips if c.review == ReviewStatus.pending]
+    for clip_id in pending:
+        reject(job_id, clip_id)
+    return len(pending)
+
+
 def reject(job_id: str, clip_id: str) -> int:
     """Mark a clip rejected and cancel any of its posts that haven't started. Returns how
     many posts were cancelled."""
@@ -329,7 +354,18 @@ def copy_text(post_id: int) -> str:
 
 def reveal_file(post_id: int) -> Path:
     """Open Explorer / Finder with the clip selected, ready to drag into the upload page."""
-    path = _clip_file(post_id)
+    return _reveal(_clip_file(post_id))
+
+
+def reveal_clip(job_id: str, clip_id: str) -> Path:
+    """Same as reveal_file, from a clip card (no post needed)."""
+    _, clip = load_clip(job_id, clip_id)
+    if clip.file is None or not clip.file.exists():
+        raise ActionError("The rendered clip file is missing. Re-render it.")
+    return _reveal(clip.file)
+
+
+def _reveal(path: Path) -> Path:
     if sys.platform == "win32":
         subprocess.Popen(["explorer", f"/select,{path}"])
     elif sys.platform == "darwin":
@@ -392,6 +428,74 @@ def refresh_sounds() -> int:
         return len(refresh().sounds)
     except SoundsError as e:
         raise ActionError(str(e)) from e
+
+
+@dataclass
+class Overview:
+    to_review: int  # clips in rendered jobs still pending review
+    due: int
+    posted_week: int
+    spend_week: float
+    running: int  # jobs still in the pipeline
+    sounds_stale: bool
+
+
+SOUNDS_STALE_AFTER = timedelta(days=3)
+
+
+def overview(now: datetime | None = None) -> Overview:
+    now = now or datetime.now()
+    rows = list_jobs()
+    to_review = sum(
+        1
+        for r in rows
+        if r.job and r.job.status == JobStatus.rendered
+        for c in r.job.clips
+        if c.review == ReviewStatus.pending
+    )
+    running = sum(1 for r in rows if not is_finished(r))
+    week_ago = now - timedelta(days=7)
+    posted_week = sum(1 for p in posts(PostStatus.published) if p.updated_at >= week_ago)
+    _, fetched_at = sounds_overview()
+    return Overview(
+        to_review=to_review,
+        due=len(due_now(now)),
+        posted_week=posted_week,
+        spend_week=llm.spend_since(week_ago),
+        running=running,
+        sounds_stale=fetched_at is None or now - fetched_at > SOUNDS_STALE_AFTER,
+    )
+
+
+def posting_streak(today: date | None = None) -> int:
+    """Days in a row (ending today, or yesterday if nothing yet today) with a post marked."""
+    today = today or date.today()
+    days = {p.updated_at.date() for p in posts(PostStatus.published)}
+    day = today if today in days else today - timedelta(days=1)
+    streak = 0
+    while day in days:
+        streak += 1
+        day -= timedelta(days=1)
+    return streak
+
+
+def week_strip(now: datetime | None = None) -> list[tuple[date, list[Post]]]:
+    """The next 7 days (today first) with their scheduled posts, for the Up next calendar."""
+    now = now or datetime.now()
+    scheduled = posts(PostStatus.scheduled)
+    out = []
+    for i in range(7):
+        day = (now + timedelta(days=i)).date()
+        out.append((day, [p for p in scheduled if p.scheduled_at.date() == day]))
+    return out
+
+
+def claude_spend() -> tuple[float, float]:
+    """Estimated Claude API spend (today, last 7 days) from workspace/claude_usage.jsonl."""
+    rows = llm.load_usage()
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return llm.spend_since(today, rows), llm.spend_since(now - timedelta(days=7), rows)
 
 
 PLATFORM_LABEL = {Platform.tiktok: "TikTok", Platform.instagram: "Instagram"}

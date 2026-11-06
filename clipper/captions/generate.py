@@ -167,7 +167,13 @@ def _ask_claude(
     )
     system = SYSTEM.format(base_tags_rule=rule)
     try:
-        result = llm.ask_json(system, build_prompt(job, transcript, sounds), CaptionSet)
+        result = llm.ask_json(
+            system,
+            build_prompt(job, transcript, sounds),
+            CaptionSet,
+            model=config.CLAUDE_MODEL_CAPTIONS,
+            task="captions",
+        )
     except llm.LLMError as e:
         log.warning("captions: Claude failed (%s); using fallback captions", e)
         return {}

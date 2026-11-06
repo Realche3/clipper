@@ -58,7 +58,7 @@ workspace/clipper.db # post queue (Post model). Only clipper/publish touches it.
 - `uv run clipper resume <job_id>`: retry a failed job, skipping finished steps
 - `uv run pytest`: tests. `uv run ruff check . --fix && uv run ruff format .`: lint and format
 - Libraries: `yt-dlp` (download), `faster-whisper` (transcription), `scenedetect` (scene cuts), `ffmpeg` via `subprocess` (all video work, no moviepy), `anthropic` (LLM), `httpx` (fetching trending-sound pages), `pyperclip` (post kit clipboard), `typer` (CLI), `pydantic` (models), `streamlit` (dashboard), `sqlite3` (post queue, stdlib).
-- LLM: use the Anthropic SDK with the model from `config.py` (default `claude-opus-5-5`). **Always call Claude through `clipper.llm.ask_json`** (structured output plus pydantic validation, retry, refusal fallback). Never create your own client.
+- LLM: **always call Claude through `clipper.llm.ask_json`** (structured output plus pydantic validation, retry, refusal fallback, usage logging). Never create your own client. Pass `model=` from config (`CLAUDE_MODEL_RANK`, `CLAUDE_MODEL_CAPTIONS`, `CLAUDE_MODEL_SOUNDS`; any new task gets its own setting) and a `task=` label. `uv run clipper usage` shows the spend.
 
 ## Code conventions
 - Type hints everywhere. Use `pathlib.Path`, never string paths, because the code must run on both Windows and macOS/Linux.

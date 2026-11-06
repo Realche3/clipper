@@ -1,0 +1,15 @@
+# Dashboard look (read by `clipper ui`, which runs Streamlit from the repo root).
+[theme]
+base = "dark"
+primaryColor = "#FE2C55"            # TikTok pink: primary buttons, active nav
+backgroundColor = "#0B0B10"
+secondaryBackgroundColor = "#17171F"
+textColor = "#F2F2F5"
+baseRadius = "0.75rem"
+font = "sans-serif"
+
+[client]
+toolbarMode = "minimal"             # hide Streamlit's deploy/dev menu
+
+[browser]
+gatherUsageStats = false

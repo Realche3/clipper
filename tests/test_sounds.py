@@ -158,3 +158,32 @@ def test_cli_refresh_failure_exits_nonzero(fake_claude, monkeypatch):
     monkeypatch.setattr(config, "TRENDING_SOURCES", ["bad-llm"])
     out = CliRunner().invoke(cli.app, ["sounds", "refresh"])
     assert out.exit_code == 1
+
+
+def test_accents_dedupe_and_generic_titles_dropped(monkeypatch):
+    assert (
+        Sound(title="Ramalama", artist="Róisín Murphy").key
+        == Sound(title="ramalama", artist="Roisin Murphy").key
+    )
+    monkeypatch.setattr(
+        llm,
+        "ask_json",
+        lambda *a, **k: Extracted(
+            sounds=[es("Original audio", artist=None), es("Original sound", "hector mort")]
+        ),
+    )
+    [s] = fetch.extract("u", "text")
+    assert s.label == "Original sound — hector mort"
+
+
+def test_extract_uses_the_sounds_model(monkeypatch):
+    seen = {}
+
+    def fake(system, prompt, schema, **kw):
+        seen.update(kw)
+        return Extracted(sounds=[])
+
+    monkeypatch.setattr(config, "CLAUDE_MODEL_SOUNDS", "claude-haiku-5-5")
+    monkeypatch.setattr(llm, "ask_json", fake)
+    fetch.extract("u", "text")
+    assert seen == {"model": "claude-haiku-5-5", "task": "sounds", "effort": "low"}

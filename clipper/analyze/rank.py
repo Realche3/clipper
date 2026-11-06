@@ -10,7 +10,7 @@ import logging
 
 from pydantic import BaseModel
 
-from clipper import llm
+from clipper import config, llm
 from clipper.analyze.candidates import Candidate
 from clipper.models import Clip, Job, Transcript
 
@@ -80,7 +80,11 @@ def rank(
     """The best n clips: Claude's valid picks first, then signal candidates to fill the gap."""
     try:
         answer = llm.ask_json(
-            SYSTEM, build_prompt(job, candidates, transcript, clip_min, clip_max), Ranking
+            SYSTEM,
+            build_prompt(job, candidates, transcript, clip_min, clip_max),
+            Ranking,
+            model=config.CLAUDE_MODEL_RANK,
+            task="rank",
         ).clips
     except llm.LLMError as e:
         log.warning("ranker fell back to signal scores: %s", e)

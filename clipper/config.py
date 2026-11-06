@@ -34,6 +34,11 @@ AUTO_APPROVE = _bool("AUTO_APPROVE", False)
 ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
 CLAUDE_MODEL = _get("CLAUDE_MODEL", "claude-opus-5-5")
 CLAUDE_EFFORT = _get("CLAUDE_EFFORT", "medium")  # low | medium | high | xhigh | max
+# Per-task models (empty = CLAUDE_MODEL). Sounds is plain list extraction, so the cheapest
+# model does it well; ranking and captions need taste, so they default to the main model.
+CLAUDE_MODEL_RANK = _get("CLAUDE_MODEL_RANK") or CLAUDE_MODEL
+CLAUDE_MODEL_CAPTIONS = _get("CLAUDE_MODEL_CAPTIONS") or CLAUDE_MODEL
+CLAUDE_MODEL_SOUNDS = _get("CLAUDE_MODEL_SOUNDS") or "claude-haiku-5-5"
 
 # Ingest
 MAX_SOURCE_MINUTES = int(_get("MAX_SOURCE_MINUTES", "90"))

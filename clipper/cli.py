@@ -95,6 +95,35 @@ def ui() -> None:
     )
 
 
+@app.command()
+def usage(days: int = typer.Option(7, help="Show the last N days.")) -> None:
+    """Claude API spend (estimated from token counts), by task and model."""
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+
+    from clipper import llm
+
+    since = datetime.now() - timedelta(days=days)
+    rows = [r for r in llm.load_usage() if datetime.fromisoformat(r["at"]) >= since]
+    if not rows:
+        typer.echo(f"no Claude calls logged in the last {days} day(s)")
+        return
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in rows:
+        groups[(r["task"], r["model"])].append(r)
+    typer.echo(f"Claude usage, last {days} day(s) (estimates):")
+    for (task, model), rs in sorted(groups.items()):
+        cost = sum(r.get("cost_usd") or 0 for r in rs)
+        tokens_in = sum(r["input_tokens"] for r in rs)
+        tokens_out = sum(r["output_tokens"] for r in rs)
+        typer.echo(
+            f"  {task:<9} {model:<18} {len(rs):>4} calls  "
+            f"{tokens_in:>9,} in  {tokens_out:>8,} out  ${cost:.3f}"
+        )
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    typer.echo(f"total ${llm.spend_since(since, rows):.3f} · today ${llm.spend_since(today):.3f}")
+
+
 sounds_app = typer.Typer(help="Trending sounds suggested for each clip.")
 app.add_typer(sounds_app, name="sounds")
 
