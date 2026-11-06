@@ -9,44 +9,38 @@ from datetime import datetime, timedelta
 
 import streamlit as st
 
-from clipper import config
 from clipper.models import JobStatus, Platform, PostStatus, ReviewStatus
 from clipper.publish.text import post_text
+from clipper.sounds.store import search_url
 from clipper.ui import actions
 
 st.set_page_config(page_title="Clipper", page_icon="🎬", layout="wide")
 
-STATUS_ICON = {
-    PostStatus.scheduled: "🕒",
-    PostStatus.uploading: "⏫",
-    PostStatus.uploaded_draft: "📥",
-    PostStatus.published: "✅",
-    PostStatus.failed: "❌",
-    PostStatus.needs_check: "⚠️",
-}
+STATUS_ICON = {PostStatus.scheduled: "🕒", PostStatus.published: "✅"}
+PLATFORM_ICON = {Platform.tiktok: "🎵", Platform.instagram: "📸"}
 REVIEW_ICON = {ReviewStatus.pending: "⏳", ReviewStatus.approved: "✅", ReviewStatus.rejected: "🚫"}
 
 
 # ---------------------------------------------------------------- header
 
 
+SOUNDS_STALE_AFTER = timedelta(days=3)
+
+
 def header() -> None:
     left, right = st.columns([3, 2])
     left.title("🎬 Clipper")
     with right:
-        if config.DRY_RUN:
-            st.info("**DRY RUN**: nothing is posted to real accounts.", icon="🧪")
-        else:
-            st.warning("**LIVE**: approved clips will be posted.", icon="🔴")
-        seen = actions.scheduler_last_seen()
-        if seen and datetime.now() - seen < timedelta(minutes=3):
-            st.caption(f"Scheduler running (last tick {seen:%H:%M:%S})")
-        else:
-            st.caption(
-                "⚠️ Scheduler not running. Start it with `uv run clipper scheduler`."
-                if seen is None
-                else f"⚠️ Scheduler last seen {seen:%b %d %H:%M}. Is it still running?"
+        sounds, fetched_at = actions.sounds_overview()
+        if fetched_at is None:
+            st.warning("No trending sounds yet: open **Sounds** and click Refresh.", icon="🎵")
+        elif datetime.now() - fetched_at > SOUNDS_STALE_AFTER:
+            st.warning(
+                f"Trending sounds are from {fetched_at:%b %d}. Refresh them on **Sounds**.",
+                icon="🎵",
             )
+        else:
+            st.caption(f"🎵 {len(sounds)} trending sounds · updated {fetched_at:%b %d %H:%M}")
 
 
 # ---------------------------------------------------------------- new video
@@ -147,7 +141,10 @@ def clip_card(job_id: str, clip_id: str) -> None:
             caption = st.text_area("Caption", clip.caption or "", key=f"cap-{key}", height=80)
             tags = st.text_input("Hashtags", " ".join(clip.hashtags), key=f"tags-{key}")
             if clip.suggested_sound:
-                st.caption(f"🎵 Suggested TikTok sound: **{clip.suggested_sound}**")
+                st.caption(
+                    f"🎵 Suggested sound: **{clip.suggested_sound}** · "
+                    f"[find it on TikTok]({search_url(clip.suggested_sound)})"
+                )
 
             b1, b2, b3 = st.columns(3)
             changed = caption != (clip.caption or "") or tags != " ".join(clip.hashtags)
@@ -167,16 +164,17 @@ def clip_card(job_id: str, clip_id: str) -> None:
 
             clip_posts = actions.posts_for_clip(job_id, clip_id)
             for post in clip_posts:
-                st.caption(
-                    f"{STATUS_ICON[post.status]} {actions.PLATFORM_LABEL[post.platform]}: "
-                    f"{post.status.value} · {post.scheduled_at:%b %d %H:%M}"
-                    + (f" · {post.error}" if post.error else "")
-                )
+                if post.status == PostStatus.published:
+                    when = f"posted {post.updated_at:%b %d %H:%M}"
+                else:
+                    when = f"post at {post.scheduled_at:%b %d %H:%M}"
+                icon = STATUS_ICON.get(post.status, "•")
+                st.caption(f"{icon} {actions.PLATFORM_LABEL[post.platform]}: {when}")
 
-            locked = any(p.status != PostStatus.scheduled for p in clip_posts)
+            locked = any(p.status == PostStatus.published for p in clip_posts)
             with st.expander("✂️ Edit hook / trim (re-renders the clip)"):
                 if locked:
-                    st.caption("Already uploaded, so it can't be changed.")
+                    st.caption("Already posted, so it can't be changed.")
                 hook = st.text_input(
                     "Hook on screen (first 3s)", clip.hook_text or "", key=f"hook-{key}"
                 )
@@ -199,99 +197,150 @@ def clip_card(job_id: str, clip_id: str) -> None:
                         _do(actions.edit_clip, job_id, clip_id, hook, start, end, ok="Re-rendered")
 
 
-def _do(fn, *args, ok: str) -> None:
+def _do(fn, *args, ok: str, rerun: bool = True) -> None:
     try:
         fn(*args)
     except actions.ActionError as e:
         st.toast(f"❌ {e}")
         return
     st.toast(f"✅ {ok}")
-    st.rerun()
+    if rerun:
+        st.rerun()
 
 
-# ---------------------------------------------------------------- queue
+# ---------------------------------------------------------------- queue (post kit)
 
 
 def page_queue() -> None:
-    all_posts = actions.posts()
-    if not all_posts:
+    queue_view()
+
+
+@st.fragment(run_every="60s")  # posts move into "Due now" without a manual refresh
+def queue_view() -> None:
+    now = datetime.now()
+    due = actions.due_now(now)
+    upcoming = actions.up_next(now)
+    done = actions.posts(PostStatus.published)
+    if not (due or upcoming or done):
         st.info("Nothing queued yet. Approve clips on the **Jobs** page.")
         return
 
-    drafts = [
-        p
-        for p in all_posts
-        if p.platform == Platform.tiktok and p.status == PostStatus.uploaded_draft
-    ]
-    problems = [p for p in all_posts if p.status in (PostStatus.failed, PostStatus.needs_check)]
-    upcoming = [p for p in all_posts if p.status in (PostStatus.scheduled, PostStatus.uploading)]
-    done = [p for p in all_posts if p.status == PostStatus.published]
-
-    st.subheader(f"📥 TikTok drafts to finish in the app ({len(drafts)})")
-    st.caption("Open TikTok → inbox notification → add the sound → paste the text → post.")
-    for p in drafts:
-        job, clip = actions.load_clip(p.job_id, p.clip_id)
-        with st.container(border=True):
-            st.markdown(f"**{clip.title or clip.id}**  ·  uploaded {p.updated_at:%b %d %H:%M}")
-            if clip.suggested_sound:
-                st.markdown(f"🎵 Sound: **{clip.suggested_sound}**")
-            st.code(post_text(job, clip, Platform.tiktok), language=None)  # has a copy button
-            url_col, btn_col = st.columns([3, 1])
-            url = url_col.text_input(
-                "TikTok link (optional)",
-                key=f"url-{p.id}",
-                placeholder="https://www.tiktok.com/@...",
-            )
-            if btn_col.button("Mark as posted", key=f"posted-{p.id}", type="primary"):
-                _do(actions.mark_posted, p.id, url, ok="Marked as posted")
-
-    if problems:
-        st.subheader(f"⚠️ Needs attention ({len(problems)})")
-        for p in problems:
-            with st.container(border=True):
-                where = f"{actions.PLATFORM_LABEL[p.platform]} · {p.job_id}/{p.clip_id}"
-                if p.status == PostStatus.needs_check:
-                    st.warning(
-                        f"⚠️ **{where}**: the upload was interrupted, so it may or may not "
-                        f"have posted. Check the account, then pick one.  \n{p.error or ''}"
-                    )
-                    c1, c2, c3 = st.columns(3)
-                    if c1.button("It's live", key=f"live-{p.id}"):
-                        _do(actions.mark_posted, p.id, None, ok="Marked as posted")
-                    if c2.button("It didn't post: retry", key=f"retry-{p.id}"):
-                        _do(actions.retry_post, p.id, ok="Rescheduled")
-                    if c3.button("Drop it", key=f"drop-{p.id}"):
-                        _do(actions.give_up_post, p.id, ok="Dropped")
-                else:
-                    st.error(f"❌ **{where}**: gave up after retries.  \n{p.error or ''}")
-                    if st.button("Try again", key=f"retry-{p.id}"):
-                        _do(actions.retry_post, p.id, ok="Rescheduled")
-
-    st.subheader(f"🕒 Upcoming ({len(upcoming)})")
-    for p in upcoming:
-        c1, c2 = st.columns([5, 1])
-        c1.write(
-            f"{STATUS_ICON[p.status]} **{p.scheduled_at:%a %b %d %H:%M}** · "
-            f"{actions.PLATFORM_LABEL[p.platform]} · {p.job_id}/{p.clip_id}"
+    st.subheader(f"🔔 Due now ({len(due)})")
+    if due:
+        st.caption(
+            "**Start posting** copies the caption, shows the clip file and opens the upload "
+            "page. Drag the file in, add the suggested sound in the editor, paste, post, then "
+            "**Mark as posted**."
         )
-        if p.status == PostStatus.scheduled and c2.button("Cancel", key=f"cancel-{p.id}"):
+    else:
+        st.caption("Nothing to post right now. The next ones are below.")
+    for p in due:
+        post_kit(p)
+
+    st.subheader(f"🕒 Up next ({len(upcoming)})")
+    for p in upcoming:
+        c1, c2, c3 = st.columns([5, 1, 1])
+        _, clip = actions.load_clip(p.job_id, p.clip_id)
+        c1.write(
+            f"**{p.scheduled_at:%a %b %d %H:%M}** · {PLATFORM_ICON[p.platform]} "
+            f"{actions.PLATFORM_LABEL[p.platform]} · {clip.title or p.clip_id}"
+        )
+        if c2.button("Post now", key=f"early-{p.id}"):
+            st.session_state[f"open-{p.id}"] = True
+        if c3.button("Cancel", key=f"cancel-{p.id}"):
             actions.cancel_post(p.id)
-            st.rerun()
+            st.rerun(scope="fragment")
+        if st.session_state.get(f"open-{p.id}"):
+            post_kit(p)
 
     st.subheader(f"✅ Posted ({len(done)})")
-    for p in done:
+    for p in sorted(done, key=lambda p: p.updated_at, reverse=True):
+        c1, c2 = st.columns([6, 1])
+        _, clip = actions.load_clip(p.job_id, p.clip_id)
         link = f" · [open]({p.url})" if p.url else ""
-        st.write(
-            f"{actions.PLATFORM_LABEL[p.platform]} · {p.job_id}/{p.clip_id} · "
-            f"{p.updated_at:%b %d %H:%M}{link}"
+        c1.write(
+            f"{PLATFORM_ICON[p.platform]} {actions.PLATFORM_LABEL[p.platform]} · "
+            f"{clip.title or p.clip_id} · {p.updated_at:%b %d %H:%M}{link}"
+        )
+        if c2.button("Undo", key=f"undo-{p.id}", help="Clicked Mark as posted by mistake?"):
+            _do(actions.undo_posted, p.id, ok="Moved back to the queue")
+
+
+def post_kit(p) -> None:
+    job, clip = actions.load_clip(p.job_id, p.clip_id)
+    platform = actions.PLATFORM_LABEL[p.platform]
+    with st.container(border=True):
+        info, video = st.columns([3, 1])
+        with info:
+            st.markdown(
+                f"{PLATFORM_ICON[p.platform]} **{platform}** · {clip.title or clip.id} · "
+                f"due {p.scheduled_at:%b %d %H:%M}"
+            )
+            if st.button(f"🚀 Start posting to {platform}", key=f"start-{p.id}", type="primary"):
+                _do(actions.start_posting, p.id, ok="Caption copied · file shown · page opened")
+            st.code(post_text(job, clip, p.platform), language=None)  # also has a copy icon
+            if clip.suggested_sound:
+                st.markdown(
+                    f"🎵 Add this sound in the editor: **{clip.suggested_sound}** · "
+                    f"[find it on TikTok]({search_url(clip.suggested_sound)})"
+                )
+            b1, b2, b3 = st.columns(3)
+            if b1.button("📋 Copy text", key=f"copy-{p.id}"):
+                _do(actions.copy_text, p.id, ok="Copied", rerun=False)
+            if b2.button("📂 Show file", key=f"file-{p.id}"):
+                _do(actions.reveal_file, p.id, ok="File shown", rerun=False)
+            if b3.button(f"↗ Open {platform}", key=f"page-{p.id}"):
+                _do(actions.open_upload_page, p.id, ok="Upload page opened", rerun=False)
+
+            url_col, done_col = st.columns([3, 1])
+            url = url_col.text_input(
+                "Link to the post (optional)", key=f"url-{p.id}", placeholder="https://..."
+            )
+            if done_col.button("✅ Mark as posted", key=f"posted-{p.id}"):
+                _do(actions.mark_posted, p.id, url, ok="Marked as posted")
+        with video:
+            if clip.file and clip.file.exists():
+                st.video(str(clip.file))
+
+
+# ---------------------------------------------------------------- sounds
+
+
+def page_sounds() -> None:
+    sounds, fetched_at = actions.sounds_overview()
+    st.subheader(f"🎵 Trending sounds ({len(sounds)})")
+    st.caption(
+        "Claude picks one of these for each clip. Add it inside the TikTok or Instagram "
+        "editor when you post: we never put music in the file. "
+        + (f"Last refresh: {fetched_at:%b %d %H:%M}." if fetched_at else "Never refreshed.")
+    )
+    if st.button("🔄 Refresh now", type="primary", key="refresh-sounds"):
+        with st.spinner("Reading this week's trending lists... (about a minute)"):
+            _do(actions.refresh_sounds, ok="Trending sounds updated")
+    st.caption("Pin your own picks in `trending_sounds.yaml`; they're always offered first.")
+    if sounds:
+        st.dataframe(
+            [
+                {
+                    "Sound": s.title,
+                    "Artist": s.artist or "",
+                    "Platform": s.platform,
+                    "Vibe": s.vibe,
+                    "Find": search_url(s.label),
+                }
+                for s in sounds
+            ],
+            column_config={"Find": st.column_config.LinkColumn("Find", display_text="TikTok")},
+            hide_index=True,
+            use_container_width=True,
         )
 
 
 # ---------------------------------------------------------------- main
 
 header()
-PAGES = {"New video": page_new, "Jobs": page_jobs, "Queue": page_queue}
+PAGES = {"New video": page_new, "Jobs": page_jobs, "Queue": page_queue, "Sounds": page_sounds}
 page = st.sidebar.radio("Page", list(PAGES), key="page")
-if problems := actions.problem_count():
-    st.sidebar.error(f"⚠️ {problems} post(s) need attention on the **Queue** page")
+if due := len(actions.due_now()):
+    st.sidebar.success(f"🔔 {due} post(s) due now on the **Queue** page")
 PAGES[page]()

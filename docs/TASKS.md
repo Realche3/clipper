@@ -50,7 +50,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 | B1 | Shared `llm.py` ⛔ | `b/llm` | **Nov 5** | — |
 | B2 | Captions | `b/captions` | Nov 6 | B1 |
 | B3 | Post queue + slots | `b/queue` | Nov 7 | — |
-| B4 | DryRun client + scheduler | `b/scheduler` | Nov 8 | B3 |
+| ~~B4~~ | ~~DryRun client + scheduler~~ (built, then removed: no auto-posting in Phase 1) | `b/scheduler` | Nov 8 | B3 |
 | B5 | Post kit (manual-assisted posting) | `b/post-kit` | Nov 8 | B4, B8 |
 | B6 | Trending sounds fetch + Claude pick | `b/sounds` | Nov 9 | B2 |
 | B7 | Dashboard v1 | `b/ui` | Nov 11 | B3 |
@@ -59,11 +59,11 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 - [x] **B1 `clipper/llm.py`** *(shared, merge first so A4 can use it)*: `ask_json(system: str, prompt: str, schema: type[BaseModel], max_tokens=...) -> BaseModel`. It uses the Anthropic SDK and `config.CLAUDE_MODEL`, validates with pydantic, retries once, then raises `LLMError`. Tests mock the client. Tell Dev A when it's merged.
 - [x] **B2 Captions** (`clipper/captions`): one Claude call per job. Fills in `hook_text`, `title`, `caption`, `hashtags` (+ `BASE_HASHTAGS`), `vibe`, and `suggested_sound` from `trending_sounds.yaml`. Fallback: the video title plus base hashtags. Leaves `status=captioned`. Test it on `tests/fixtures/sample_manifest.json`.
 - [x] **B3 Queue + slots** (`publish/queue.py`, `publish/slots.py`): SQLite `posts` table with `UNIQUE(job_id, clip_id, platform)`. `enqueue(job, clip)` adds one row per enabled platform. `next_slot()` respects the interval, posting window, and daily cap. **Unit tests for the slotting.**
-- [x] **B4 Scheduler** (`publish/scheduler.py`, `publish/dryrun.py`): a loop every 60s that claims due rows with `scheduled→uploading`, calls the client, and records the result. Retries at 5, 15, and 45 min. A row stuck for more than 15 min becomes `needs_check`. Use `DryRunClient` whenever `DRY_RUN=true`. Add the `clipper scheduler` command.
-- [ ] **B5 Post kit** (`clipper/ui`, `publish/`; ARCHITECTURE.md §5.6): `POST_MODE=manual` (default) in config. The Queue page gets a **Due now** section. Each post has a **Start posting** button that copies the platform text to the clipboard, reveals the clip in Explorer/Finder and opens the upload page, plus the suggested sound with a search link and **Mark as posted** (also from `scheduled`). `clipper scheduler` refuses to start in manual mode.
+- [x] ~~**B4 Scheduler**~~ **Removed with B5** (Phase 1 has no auto-posting; restore from PR #6 if needed). Was: (`publish/scheduler.py`, `publish/dryrun.py`): a loop every 60s that claims due rows with `scheduled→uploading`, calls the client, and records the result. Retries at 5, 15, and 45 min. A row stuck for more than 15 min becomes `needs_check`. Use `DryRunClient` whenever `DRY_RUN=true`. Add the `clipper scheduler` command.
+- [x] **B5 Post kit** (`clipper/ui`, `publish/`; ARCHITECTURE.md §5.6): The Queue page gets a **Due now** section. Each post has a **Start posting** button that copies the platform text to the clipboard, reveals the clip in Explorer/Finder and opens the upload page, plus the suggested sound with a search link, **Mark as posted** and **Undo**. The scheduler was removed.
   *Done when:* approve a clip, it shows as due at its slot, one click prepares everything, and Mark as posted moves it to Posted.
-- [ ] **B6 Trending sounds** (`clipper/sounds`; ARCHITECTURE.md §5.7): `clipper sounds refresh` fetches each page in `TRENDING_SOURCES`, has Claude extract `{title, artist, platform, vibe}`, and merges with `trending_sounds.yaml` into `workspace/trending_sounds.json`. Captions passes the list to Claude to pick a sound per clip. The dashboard gets a Sounds page with a Refresh button and the date of the last update.
-  *Done when:* a real refresh returns 100+ sounds, and a new job's clips get suggestions from that list.
+- [x] **B6 Trending sounds** (`clipper/sounds`; ARCHITECTURE.md §5.7): `clipper sounds refresh` fetches each page in `TRENDING_SOURCES`, has Claude extract `{title, artist, platform, vibe}`, and merges with `trending_sounds.yaml` into `workspace/trending_sounds.json`. Captions passes the list to Claude to pick a sound per clip. The dashboard gets a Sounds page with a Refresh button and the date of the last update.
+  *Done when:* a real refresh returns about 100 sounds (94 from the 12 default sources on Nov 6), and a new job's clips get suggestions from that list.
 - [x] **B7 Dashboard v1** (`clipper/ui/app.py`, `clipper ui` command):
   - Paste a URL plus an optional **context note** ("what is this video about?") to spawn `clipper run --context ...` as a subprocess. Show the job list with status.
   - Clip grid with a video player, approve/reject, and editable caption and hashtags.
@@ -74,7 +74,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
 ---
 
 ## Together
-- [ ] **M1 (Nov 12): end to end.** A real video becomes clips, gets approved, and posts with `DRY_RUN=false` to **private or test** posts.
+- [ ] **M1 (Nov 12): end to end.** A real video becomes clips, gets approved, and gets posted with the post kit.
 - [ ] **Rehearsal (Nov 13–16):** post real pre-launch GTA 6 content on the live accounts. Fix whatever hurts.
 - [ ] **Code freeze (Nov 17):** bug-fix PRs only after this.
 - [ ] **Launch (Nov 19):** follow the runbook in ARCHITECTURE.md §11.

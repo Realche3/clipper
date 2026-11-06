@@ -10,6 +10,7 @@ dependencies = [
     "httpx",
     "numpy",
     "pydantic>=2",
+    "pyperclip",  # post kit: copy the caption to the clipboard
     "python-dotenv",
     "pyyaml",
     "scenedetect[opencv]",

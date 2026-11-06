@@ -1,7 +1,7 @@
 """B8: clip edits with re-render, retrying failed jobs, resolving posts by hand."""
 
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +24,8 @@ def settings(monkeypatch, tmp_path):
     monkeypatch.setenv("WORKSPACE", str(ws))  # for subprocesses
     monkeypatch.setattr(config, "WORKSPACE", ws)
     monkeypatch.setattr(config, "DB_FILE", ws / "clipper.db")
-    monkeypatch.setattr(config, "DRY_RUN", True)
+    monkeypatch.setattr(config, "TRENDING_SOUNDS_FILE", tmp_path / "pinned.yaml")
+    monkeypatch.setattr(config, "TRENDING_SOUNDS_JSON", ws / "trending_sounds.json")
     monkeypatch.setattr(config, "AUTO_APPROVE", False)
     monkeypatch.setattr(config, "ENABLED_PLATFORMS", ["tiktok", "instagram"])
     monkeypatch.setattr(config, "POSTING_WINDOW", "00:00-23:59")
@@ -106,12 +107,12 @@ def test_failed_rerender_keeps_job_usable(monkeypatch, job):
     assert Job.load(config.WORKSPACE, "j1").status == JobStatus.rendered
 
 
-def test_cannot_edit_after_upload_started(monkeypatch, job):
+def test_cannot_edit_after_posting(monkeypatch, job):
     actions.approve("j1", "c01")
     [tt] = [p for p in actions.posts_for_clip("j1", "c01") if p.platform == Platform.tiktok]
-    set_status(tt.id, PostStatus.uploaded_draft)
+    set_status(tt.id, PostStatus.published)
     calls = fake_run(monkeypatch)
-    with pytest.raises(actions.ActionError, match="already been uploaded"):
+    with pytest.raises(actions.ActionError, match="already been posted"):
         actions.edit_clip("j1", "c01", "h", 10, 30)
     assert calls == []
 
@@ -195,77 +196,6 @@ def test_cli_resume_runs_every_stage_and_clears_error(monkeypatch, job):
     assert ran == [(s, False, None) for s in cli.STAGES]
 
 
-# ---------------------------------------------------------------- manual post fixes
-
-
-@pytest.fixture
-def ig_post(job):
-    actions.approve("j1", "c01")
-    [p] = [p for p in actions.posts_for_clip("j1", "c01") if p.platform == Platform.instagram]
-    return p
-
-
-def test_mark_posted_from_draft_saves_url(ig_post):
-    set_status(ig_post.id, PostStatus.uploaded_draft)
-    actions.mark_posted(ig_post.id, " https://tiktok.com/@me/1 ")
-    post = next(p for p in actions.posts() if p.id == ig_post.id)
-    assert post.status == PostStatus.published and post.url == "https://tiktok.com/@me/1"
-
-
-def test_mark_posted_from_needs_check_without_url(ig_post):
-    set_status(ig_post.id, PostStatus.needs_check)
-    actions.mark_posted(ig_post.id, "")
-    assert next(p for p in actions.posts() if p.id == ig_post.id).status == PostStatus.published
-
-
-def test_mark_posted_rejects_scheduled_post(ig_post):
-    with pytest.raises(actions.ActionError):
-        actions.mark_posted(ig_post.id)
-
-
-@pytest.mark.parametrize("status", [PostStatus.failed, PostStatus.needs_check])
-def test_retry_reschedules_with_fresh_attempts(ig_post, status):
-    conn = queue.connect()
-    conn.execute(
-        "UPDATE posts SET status = ?, attempts = 4, error = 'x' WHERE id = ?",
-        (status.value, ig_post.id),
-    )
-    conn.close()
-    post = actions.retry_post(ig_post.id)
-    assert post.status == PostStatus.scheduled and post.attempts == 0 and post.error is None
-
-
-def test_retry_respects_other_slots(tmp_path):
-    conn = queue.connect(tmp_path / "q.db")
-    f = tmp_path / "x.mp4"
-    f.write_bytes(b"x")
-    job = Job(id="jq", source_url="u")
-    clips = [Clip(id=c, start=0, end=10, file=f, review="approved") for c in ("c01", "c02")]
-    a = queue.enqueue(conn, job, clips[0], now=NOW, platforms=[Platform.instagram])[0]
-    queue.enqueue(conn, job, clips[1], now=NOW, platforms=[Platform.instagram])  # 13:30
-    conn.execute("UPDATE posts SET status = 'failed' WHERE id = ?", (a.id,))
-    again = queue.requeue(conn, a.id, now=NOW)
-    assert again.scheduled_at == NOW  # its old slot is free; c02 is 90 min away
-    conn.execute("UPDATE posts SET status = 'failed' WHERE id = ?", (a.id,))
-    later = queue.requeue(conn, a.id, now=NOW + timedelta(minutes=60))
-    assert later.scheduled_at == NOW + timedelta(minutes=180)  # must clear c02 at 13:30
-    conn.close()
-
-
-def test_retry_refuses_live_posts(ig_post):
-    set_status(ig_post.id, PostStatus.published)
-    with pytest.raises(actions.ActionError):
-        actions.retry_post(ig_post.id)
-
-
-def test_give_up_only_from_needs_check(ig_post):
-    with pytest.raises(actions.ActionError):
-        actions.give_up_post(ig_post.id)
-    set_status(ig_post.id, PostStatus.needs_check)
-    actions.give_up_post(ig_post.id)
-    assert next(p for p in actions.posts() if p.id == ig_post.id).status == PostStatus.failed
-
-
 # ---------------------------------------------------------------- pages
 
 
@@ -290,26 +220,3 @@ def test_failed_job_shows_retry(job):
     assert not at.exception
     assert "ffmpeg failed" in at.error[0].value
     assert at.button(key="resume-j1")
-
-
-def test_queue_needs_check_buttons_and_sidebar_alert(ig_post):
-    set_status(ig_post.id, PostStatus.needs_check)
-    at = run_app("Queue")
-    assert not at.exception
-    assert any("need attention" in e.value for e in at.sidebar.error)
-    at.button(key=f"live-{ig_post.id}").click().run()
-    assert not at.exception
-    assert next(p for p in actions.posts() if p.id == ig_post.id).status == PostStatus.published
-
-
-def test_queue_draft_mark_as_posted(ig_post):
-    conn = queue.connect()
-    [tt] = queue.list_posts(conn, platform=Platform.tiktok)
-    conn.close()
-    set_status(tt.id, PostStatus.uploaded_draft)
-    at = run_app("Queue")
-    at.text_input(key=f"url-{tt.id}").input("https://tiktok.com/@me/9")
-    at.button(key=f"posted-{tt.id}").click().run()
-    assert not at.exception
-    post = next(p for p in actions.posts() if p.id == tt.id)
-    assert post.status == PostStatus.published and post.url == "https://tiktok.com/@me/9"

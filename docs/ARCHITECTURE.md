@@ -27,7 +27,7 @@ The MVP is done when all of these hold:
 | Render | 9:16 blurred-background layout, word-by-word subtitles, hook text for the first 3s, loudness normalized. |
 | Copy | Claude writes the hook, title, caption, and hashtags, and picks a suggested sound from the fetched trending list (§5.7). |
 | Review | Streamlit dashboard: submit a URL, watch progress, preview clips, edit, approve or reject, re-render one clip. |
-| Publish | **Manual-assisted (`POST_MODE=manual`)**: a post kit per clip and platform (copy caption, show file, open upload page, suggested sound, mark as posted). No platform APIs. |
+| Publish | **Manual-assisted**: a post kit per clip and platform (copy caption, show file, open upload page, suggested sound, mark as posted). No platform APIs. |
 | Scheduling | Per-platform queue with spacing, posting window and daily cap. In manual mode the times are reminders: the Queue page shows what's due now. |
 | Trending sounds | `clipper sounds refresh` fetches 100+ currently trending TikTok and Reels songs from public weekly roundups. Claude extracts them, and the dashboard can refresh the list. |
 
@@ -35,7 +35,7 @@ The MVP is done when all of these hold:
 - Facecam layout (manual crop preset per channel)
 - Royalty-free music mix (`MUSIC_MODE=library`)
 - YouTube Shorts upload
-- **Auto-posting (`POST_MODE=auto`)** through the Upload-Post API: one client for TikTok and Instagram that plugs into the existing scheduler. The scheduler, retries and `needs_check` are already built for it.
+- **Auto-posting** through the Upload-Post API. It needs a posting loop again: the scheduler (claim, retries, `needs_check`, DryRun client) was built in PR #6 and removed in Phase 1, so restore it from git history instead of rewriting it.
 - Phone share-sheet button (Web Share API) to send a clip straight into the TikTok or Instagram editor. Needs the dashboard on HTTPS, e.g. via a tunnel.
 - Claude vision ranking (send frames from each candidate)
 - Running on a VPS so the laptop can sleep
@@ -57,24 +57,25 @@ Multiple accounts per platform · user logins or auth (Phase 2) · analytics and
 ## 4. System overview
 
 ```
-                ┌──────────────── Streamlit dashboard (clipper ui) ────────────────┐
-                │ submit URL · progress · preview · edit · approve · queue view    │
-                └───────┬───────────────────────────────▲────────────────┬─────────┘
-                        │ spawns subprocess             │ reads          │ enqueue approved
-                        ▼                               │                ▼
- ┌───────────────────── Pipeline worker (clipper run) ──┴───┐    ┌──────────────────┐
- │ ingest → analyze → captions → render                     │    │ SQLite post queue│
- │   each stage: run(job, force) -> job                     │    │  workspace/      │
- │   state: workspace/jobs/<id>/manifest.json               │    │  clipper.db      │
- └──────────────────────────────────────────────────────────┘    └────────▲─────────┘
-                                                                          │ claims due posts
-                                              ┌───────────────────────────┴─────────┐
-                                              │ Scheduler (clipper scheduler)       │
-                                              │ loop every 60s → TikTok / IG client │
-                                              └─────────────────────────────────────┘
+                ┌──────────────── Streamlit dashboard (clipper ui) ─────────────────────┐
+                │ submit URL · progress · preview · edit · approve                      │
+                │ Queue: due now → post kit (copy text · show file · open upload page)  │
+                │ Sounds: trending list + refresh                                       │
+                └───────┬───────────────────────────────▲──────────────┬────────────────┘
+                        │ spawns subprocess             │ reads        │ enqueue / mark posted
+                        ▼                               │              ▼
+ ┌───────────────────── Pipeline worker (clipper run) ──┴───┐   ┌──────────────────┐
+ │ ingest → analyze → captions → render                     │   │ SQLite post queue│
+ │   each stage: run(job, force) -> job                     │   │  clipper.db      │
+ │   state: workspace/jobs/<id>/manifest.json               │   └──────────────────┘
+ └──────────────────────────────────────────────────────────┘
+        captions reads ▲
+ ┌──────────────────────┴───────────────────────────────────┐
+ │ clipper sounds refresh: roundup pages → Claude → trending_sounds.json │
+ └──────────────────────────────────────────────────────────┘
 ```
 
-It runs as three local processes from one Python package, with no servers to deploy. The scheduler runs on the **posting machine**, which must stay awake during the posting window.
+It runs as two local processes from one Python package (the dashboard and the pipeline it spawns), with no servers to deploy. Nothing runs in the background: posting happens when you click.
 
 ## 5. Pipeline stages
 
@@ -99,7 +100,7 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 ### 5.3 captions (Dev B)
 - One Claude call per job (all clips together, so the captions don't repeat each other). Inputs, most trusted first: the poster's `context` note given at submit time, the source title, channel and description, then each clip's reason and transcript snippet. **Nothing is hardcoded to GTA**, so Claude infers the niche from these inputs.
 - Output per clip: `hook_text` (≤ 6 words, shown on screen for the first 3s), `title`, `caption` (≤ 150 chars, no hashtags), and `hashtags` (3–5, niche-specific, plus the optional account-wide `BASE_HASHTAGS`).
-- `suggested_sound`: a match from `trending_sounds.yaml` by `vibe`, which Claude also picks (hype, funny, chill, or dramatic).
+- `suggested_sound`: Claude picks it by number from the trending list (§5.7), preferring different sounds for different clips. Fallback: a sound with the clip's `vibe`.
 - Status becomes `captioned`.
 
 ### 5.4 render (Dev A)
@@ -115,25 +116,21 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 - Editing the hook, start, or end re-renders that clip. Approve sets `review=approved` and adds one queue row per enabled platform.
 - `AUTO_APPROVE=true` skips the review step. It's off by default because a bad clip can hurt the account.
 
-### 5.6 publish and schedule (Dev B)
+### 5.6 posting: queue + post kit (Dev B)
 
-> **Phase 1 = `POST_MODE=manual` (D18).** Approving a clip still books a slot per platform, but the slot is a *reminder*. The Queue page lists posts that are **due now**, each with a post kit:
+> **Phase 1 is manual posting (D18).** Approving a clip still books a slot per platform, but the slot is a *reminder*. The Queue page lists posts that are **due now**, each with a post kit:
 > - **Start posting**: copies the platform-formatted text (`publish/text.py`) to the clipboard, reveals the clip file in Explorer/Finder, and opens the upload page (TikTok Studio upload / Instagram).
 > - The suggested sound, with a link that searches for it.
-> - **Mark as posted** (optional link): `scheduled` / `uploaded_draft` / `needs_check` → `published`.
+> - Separate **Copy text / Show file / Open upload page** buttons, and **Post now** for a post that isn't due yet.
+> - **Mark as posted** (optional link): `scheduled` → `published`. **Undo** moves it back.
 >
-> `clipper scheduler` refuses to start in manual mode, so nothing is ever "posted" by the DryRun client by mistake. The scheduler, retries and clients below stay for `POST_MODE=auto` (Stretch / Phase 2).
+> The Queue page refreshes every minute, so posts move into **Due now** by themselves. There's no background process: if the dashboard is closed, posts just wait.
 
 - **Queue (`workspace/clipper.db`, table `posts`):** id, job_id, clip_id, platform, status, scheduled_at, attempts, remote_id, url, error, updated_at. UNIQUE(job_id, clip_id, platform), which is the double-post guard.
 - **Slotting:** the next free slot per platform, at least `POST_INTERVAL_MINUTES` after the previous one, inside `POSTING_WINDOW` (e.g. 10:00–23:30 local), under `DAILY_CAP_<PLATFORM>`. Otherwise it moves to the next day.
-- **Scheduler loop (every 60s):** claim due rows (`scheduled → uploading`, in one transaction), call the client, then set `published` / `uploaded_draft` or `failed`.
-  - Retry with backoff (5, 15, then 45 min): up to 3 retries, 4 tries in total. A retry that falls outside the posting window moves to the next window start.
-  - A row stuck in `uploading` for more than 15 min becomes `needs_check`. **We never retry blindly**, because that's how double posts happen.
-- **Clients:** they share one interface, `publish(job, clip) -> PostResult` (`publish/clients.py`). A client raises `PublishError(retryable=...)` only when it is **sure nothing went out**: retryable gets retried, otherwise the post is `failed`. Any other exception, including `UploadStateUnknown`, sends the post to `needs_check`.
-  - `UploadPostClient` (auto mode, Stretch): one client for TikTok and Instagram through the Upload-Post API.
-  - `DryRunClient`: logs only. It's used whenever `DRY_RUN=true`, which is **the default**.
-- **Instagram caption:** `caption + "\n\n" + hashtags + "\n🎥 " + credit`.
-- **TikTok:** the dashboard shows the caption and hashtags with a copy button, plus the suggested sound.
+- **Statuses:** only `scheduled` and `published` are used in Phase 1. The other `PostStatus` values stay in `models.py` for a future auto mode.
+- **Post text** (`publish/text.py`): Instagram is `caption + "\n\n" + hashtags + "\n🎥 " + credit`. TikTok is one line: caption, hashtags, credit.
+- **Clipboard / file manager / browser** actions run on your own computer (the dashboard is localhost-only). The clipboard goes through `pyperclip`. Explorer `/select`, Finder `open -R`, or `xdg-open`.
 
 ### 5.7 trending sounds (Dev B)
 - `clipper sounds refresh`, or the **Refresh** button on the dashboard, downloads each page in `TRENDING_SOURCES` (weekly roundups of trending TikTok and Reels audio). It strips the HTML to text and makes one `ask_json` call per page to extract `[{title, artist, platform, vibe}]`.
@@ -150,9 +147,10 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 | Job, clip times, captions, review state | `workspace/jobs/<id>/manifest.json` (`Job` model) | The pipeline while running. The dashboard only after the job is `rendered`. |
 | Transcript | `workspace/jobs/<id>/transcript.json` (`Transcript` model) | analyze |
 | Media | `source.mp4`, `audio.wav`, `clips/<clip_id>.mp4` and `.ass` | ingest, render |
-| Post queue | `workspace/clipper.db` (`Post` model) | dashboard (enqueue), scheduler (status) |
+| Post queue | `workspace/clipper.db` (`Post` model) | dashboard (enqueue, mark posted) |
+| Trending sounds | `workspace/trending_sounds.json` (fetched) + `trending_sounds.yaml` (pinned) | `clipper sounds refresh` / dashboard, human |
 | Secrets | `.env`, `secrets/tokens.json` | human, auth commands |
-| Logs | `workspace/jobs/<id>/job.log`, `workspace/scheduler.log` | each process |
+| Logs | `workspace/jobs/<id>/job.log` | pipeline |
 
 Rules:
 - Only one process writes a manifest at a time. Which one depends on the job status in the table above.
@@ -164,9 +162,9 @@ Rules:
 | # | Decision | Why | Rejected alternatives |
 |---|---|---|---|
 | D1 | Python 3.11 + uv, one package | Best video and ML libraries. uv makes setup identical on Windows and Mac. | Node (weak ML), Go |
-| D2 | A local monolith with 3 processes (ui / worker / scheduler) | 2 weeks, 2 people. Nothing to deploy. | Microservices, Docker, a cloud backend |
+| D2 | A local monolith: the dashboard plus the pipeline it spawns (the scheduler was dropped with D18) | 2 weeks, 2 people. Nothing to deploy. | Microservices, Docker, a cloud backend |
 | D3 | Stages communicate only through `manifest.json` | Both devs can work in parallel against fixtures. Easy to debug, and stages can resume. | Shared DB for everything, in-memory pipeline |
-| D4 | SQLite only for the post queue | Needs atomic claims and uniqueness. The scheduler and dashboard write at the same time. | JSON queue (race conditions), Redis |
+| D4 | SQLite only for the post queue | Needs uniqueness (no double queueing) and safe writes from dashboard reruns and CLI runs. | JSON queue (race conditions), Redis |
 | D5 | No job queue. The dashboard spawns `clipper run` as a subprocess, one job at a time. | Whisper and ffmpeg already max out the CPU, so parallel jobs don't help. | Celery, RQ, Redis |
 | D6 | Highlights = signal scoring, then Claude ranking | Gameplay often has little speech, so text-only LLM picking misses action. The signals keep LLM input small and cheap. | Transcript-only LLM (AutoClip style), vision on every frame (slow, expensive) |
 | D7 | faster-whisper `small` int8 on CPU | About 4–8 min for 20 min of audio on a laptop. Works without a GPU. | OpenAI Whisper API (cost, upload time), YouTube auto-captions (bad timings). Kept as a fallback. |
@@ -178,9 +176,9 @@ Rules:
 | D13 | ~~TikTok inbox/draft upload~~, replaced by D18 | — | — |
 | D14 | ~~Instagram resumable local upload~~, replaced by D18 | — | — |
 | D15 | Streamlit dashboard | Vibe-codes fast and has a built-in video player. It's only a viewer and editor over the files and the DB. | React/Tauri (too slow to build), CLI-only review |
-| D16 | `DRY_RUN=true` by default, with a DryRun client | Vibe-coding must never post to the real accounts by accident. | — |
+| D16 | ~~`DRY_RUN` with a DryRun client~~, removed with D18: nothing posts automatically, so there's nothing to dry-run | — | — |
 | D17 | Folder ownership per dev, and the shared contract changes only by agreement | Prevents merge conflicts and silent breakage between two AI-assisted devs | — |
-| D18 | **Phase 1 posting is manual-assisted** (`POST_MODE=manual`): a post kit, no platform APIs | No app reviews or OAuth, it works for any account today, and it allows in-app trending sounds. About 1 min per post. | Own TikTok/Meta apps (days of review, TikTok private-only until audit), Upload-Post API ($24/mo, kept as auto mode later), browser automation (against platform terms) |
+| D18 | **Phase 1 posting is manual-assisted**: a post kit, no platform APIs, no scheduler | No app reviews or OAuth, it works for any account today, and it allows in-app trending sounds. About 1 min per post. | Own TikTok/Meta apps (days of review, TikTok private-only until audit), Upload-Post API ($24/mo, kept as auto mode later), browser automation (against platform terms) |
 | D19 | Trending sounds come from public weekly roundups, extracted by Claude | No official API exists. Roundups are plain HTML and cover both platforms. Claude copes with changing page layouts. | TikTok Creative Center scraping (signed session), paid scrapers (Apify), a hand-kept list only (too small) |
 
 ## 8. Module layout
@@ -190,12 +188,12 @@ clipper/
   models.py        # SHARED contract: Job, Clip, Transcript, Post (+ atomic manifest save)
   config.py        # SHARED settings from .env
   llm.py           # SHARED Claude call -> pydantic model (Dev B writes on day 1)
-  cli.py           # SHARED typer entry: run, stage, ui, scheduler, auth
+  cli.py           # SHARED typer entry: run, stage, resume, ui, sounds refresh|list
   ingest/          # Dev A
   analyze/         # Dev A: transcribe.py, signals.py, candidates.py, rank.py
   render/          # Dev A: layout.py, subtitles.py (ASS), encode.py
   captions/        # Dev B: generate.py, sounds.py
-  publish/         # Dev B: queue.py, slots.py, scheduler.py, clients.py, dryrun.py, text.py, (uploadpost.py later)
+  publish/         # Dev B: queue.py, slots.py, text.py
   sounds/          # Dev B: fetch.py (roundup pages -> Claude -> trending_sounds.json)
   ui/              # Dev B: Streamlit app.py
 tests/             # pure-function tests + fixture manifests, no network
@@ -239,7 +237,7 @@ tests/             # pure-function tests + fixture manifests, no network
 | YouTube blocks downloads | Cookies from the browser, `uv lock --upgrade-package yt-dlp` |
 | Whisper too slow | `base` model, CUDA if available, YouTube subtitles as a fallback |
 | Accounts flagged for reposting | Own or permitted sources, real changes to each clip, credit lines, a daily cap |
-| Double posts | UNIQUE constraint, a claim before upload, and `needs_check` instead of blind retries |
+| Double posts | UNIQUE(job, clip, platform) in the queue, and a clip leaves **Due now** once it's marked as posted |
 | Laptop sleeps and the schedule stops | Disable sleep. Moving to a VPS is on the stretch list. |
 | The two devs break each other's code | The contract-change rule (D17), fixture tests in CI on every PR |
 

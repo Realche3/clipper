@@ -1,4 +1,7 @@
-"""SQLite post queue (workspace/clipper.db). Only clipper/publish touches this table.
+"""SQLite post queue (workspace/clipper.db). Only clipper/publish and the dashboard use it.
+
+Phase 1 is manual posting (ARCHITECTURE.md D18): a post is `scheduled` (its time is a reminder)
+until you mark it `published` from the dashboard.
 
 Double-post guard: UNIQUE(job_id, clip_id, platform). A clip can be queued once per platform,
 ever; re-enqueueing returns the existing row instead of creating a new one.
@@ -32,7 +35,7 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS posts_due ON posts (status, scheduled_at);
 """
 
-# Rows that occupy a slot. Failed posts never went out, so their slot is free again.
+# Rows that occupy a slot. (failed is unused in manual mode; kept for a future auto mode.)
 _SLOT_STATUSES = tuple(s.value for s in PostStatus if s != PostStatus.failed)
 
 
@@ -46,7 +49,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     # isolation_level=None: we open transactions explicitly (BEGIN IMMEDIATE) where it matters.
     conn = sqlite3.connect(path, timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")  # dashboard + scheduler can read/write together
+    conn.execute("PRAGMA journal_mode=WAL")  # dashboard reruns + CLI can read/write together
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
     return conn
@@ -77,7 +80,12 @@ def enabled_platforms() -> list[Platform]:
 
 
 def taken_slots(conn: sqlite3.Connection, platform: Platform) -> list[datetime]:
-    return [t for t, _ in _slots_with_ids(conn, platform)]
+    marks = ",".join("?" * len(_SLOT_STATUSES))
+    rows = conn.execute(
+        f"SELECT scheduled_at FROM posts WHERE platform = ? AND status IN ({marks})",
+        (platform.value, *_SLOT_STATUSES),
+    )
+    return [datetime.fromisoformat(r["scheduled_at"]) for r in rows]
 
 
 def enqueue(
@@ -168,162 +176,38 @@ def list_posts(
     return [_row_to_post(r) for r in conn.execute(sql, args)]
 
 
-# ---------------------------------------------------------------- scheduler side
-
-
-def claim_next(conn: sqlite3.Connection, now: datetime, platforms: list[Platform]) -> Post | None:
-    """Atomically move the earliest due post (on one of `platforms`) from scheduled to
-    uploading and return it. One statement, so two schedulers can never claim the same row.
-    """
-    if not platforms:
-        return None
-    marks = ",".join("?" * len(platforms))
-    row = conn.execute(
-        "UPDATE posts SET status = ?, attempts = attempts + 1, updated_at = ?"
-        " WHERE id = (SELECT id FROM posts WHERE status = ? AND scheduled_at <= ?"
-        f"             AND platform IN ({marks}) ORDER BY scheduled_at, id LIMIT 1)"
-        " RETURNING *",
-        (
-            PostStatus.uploading.value,
-            now.isoformat(),
-            PostStatus.scheduled.value,
-            now.isoformat(),
-            *(p.value for p in platforms),
-        ),
-    ).fetchone()
-    return _row_to_post(row) if row else None
-
-
-def record_success(
-    conn: sqlite3.Connection,
-    post_id: int,
-    *,
-    status: PostStatus,
-    remote_id: str | None,
-    url: str | None,
-    now: datetime,
-) -> None:
-    conn.execute(
-        "UPDATE posts SET status = ?, remote_id = ?, url = ?, error = NULL, updated_at = ?"
-        " WHERE id = ?",
-        (status.value, remote_id, url, now.isoformat(), post_id),
-    )
-
-
-def record_retry(
-    conn: sqlite3.Connection, post_id: int, *, error: str, retry_at: datetime, now: datetime
-) -> None:
-    """The upload definitely didn't happen; put it back in the queue for later."""
-    conn.execute(
-        "UPDATE posts SET status = ?, scheduled_at = ?, error = ?, updated_at = ? WHERE id = ?",
-        (PostStatus.scheduled.value, retry_at.isoformat(), error, now.isoformat(), post_id),
-    )
-
-
-def record_final(
-    conn: sqlite3.Connection, post_id: int, *, status: PostStatus, error: str, now: datetime
-) -> None:
-    """Stop processing this post: `failed` (gave up) or `needs_check` (human must verify)."""
-    conn.execute(
-        "UPDATE posts SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-        (status.value, error, now.isoformat(), post_id),
-    )
-
-
-def mark_stuck(conn: sqlite3.Connection, now: datetime, older_than: timedelta) -> int:
-    """Posts left in `uploading` (e.g. the scheduler crashed mid-upload) become needs_check.
-
-    We can't know whether the upload went through, so a human checks instead of a retry.
-    """
-    cur = conn.execute(
-        "UPDATE posts SET status = ?, error = ?, updated_at = ?"
-        " WHERE status = ? AND updated_at < ?",
-        (
-            PostStatus.needs_check.value,
-            "upload was interrupted; check the account before re-posting",
-            now.isoformat(),
-            PostStatus.uploading.value,
-            (now - older_than).isoformat(),
-        ),
-    )
-    return cur.rowcount
-
-
-# ---------------------------------------------------------------- manual fixes (dashboard)
+# ---------------------------------------------------------------- manual posting (dashboard)
 
 
 def mark_published(
     conn: sqlite3.Connection, post_id: int, *, url: str | None, now: datetime
 ) -> bool:
-    """A human confirms the post is live: a finished TikTok draft, or a needs_check that
-    turned out to have gone through."""
+    """You posted it by hand (post kit). Optional link to the live post."""
     cur = conn.execute(
         "UPDATE posts SET status = ?, url = COALESCE(?, url), error = NULL, updated_at = ?"
-        " WHERE id = ? AND status IN (?, ?)",
+        " WHERE id = ? AND status = ?",
         (
             PostStatus.published.value,
             url or None,
             now.isoformat(),
             post_id,
-            PostStatus.uploaded_draft.value,
-            PostStatus.needs_check.value,
+            PostStatus.scheduled.value,
         ),
     )
     return cur.rowcount == 1
 
 
-def requeue(conn: sqlite3.Connection, post_id: int, *, now: datetime) -> Post | None:
-    """A human confirms a failed / needs_check post did NOT go out: book it at the next
-    free slot with a fresh retry budget. Returns the updated post, or None if not allowed."""
-    post = get_post(conn, post_id)
-    if post is None or post.status not in (PostStatus.failed, PostStatus.needs_check):
-        return None
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        taken = [
-            t
-            for t, pid in _slots_with_ids(conn, post.platform)
-            if pid != post_id  # its own old slot doesn't count
-        ]
-        slot = next_slot(
-            now,
-            taken,
-            interval=timedelta(minutes=config.POST_INTERVAL_MINUTES),
-            window=parse_window(config.POSTING_WINDOW),
-            daily_cap=daily_cap(post.platform),
-        )
-        conn.execute(
-            "UPDATE posts SET status = ?, scheduled_at = ?, attempts = 0, error = NULL,"
-            " updated_at = ? WHERE id = ?",
-            (PostStatus.scheduled.value, slot.isoformat(), now.isoformat(), post_id),
-        )
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
-    return get_post(conn, post_id)
-
-
-def give_up(conn: sqlite3.Connection, post_id: int, *, now: datetime) -> bool:
-    """needs_check -> failed, when a human decides not to post it after all."""
+def unmark_published(conn: sqlite3.Connection, post_id: int, *, now: datetime) -> bool:
+    """Undo "Mark as posted" (clicked by mistake): back to scheduled, link cleared."""
     cur = conn.execute(
-        "UPDATE posts SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-        (PostStatus.failed.value, now.isoformat(), post_id, PostStatus.needs_check.value),
+        "UPDATE posts SET status = ?, url = NULL, updated_at = ? WHERE id = ? AND status = ?",
+        (PostStatus.scheduled.value, now.isoformat(), post_id, PostStatus.published.value),
     )
     return cur.rowcount == 1
 
 
-def _slots_with_ids(conn: sqlite3.Connection, platform: Platform) -> list[tuple[datetime, int]]:
-    marks = ",".join("?" * len(_SLOT_STATUSES))
-    rows = conn.execute(
-        f"SELECT scheduled_at, id FROM posts WHERE platform = ? AND status IN ({marks})",
-        (platform.value, *_SLOT_STATUSES),
-    )
-    return [(datetime.fromisoformat(r["scheduled_at"]), r["id"]) for r in rows]
-
-
 def cancel(conn: sqlite3.Connection, post_id: int) -> bool:
-    """Remove a post that hasn't started uploading. Returns False if it can't be cancelled."""
+    """Remove a post that hasn't been posted yet. Returns False if it can't be cancelled."""
     cur = conn.execute(
         "DELETE FROM posts WHERE id = ? AND status = ?", (post_id, PostStatus.scheduled.value)
     )
