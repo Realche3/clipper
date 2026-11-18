@@ -47,6 +47,7 @@ def _fake_claude(monkeypatch, result=None, error=None):
 def _cap(id, vibe="hype", **kw):
     base = dict(
         id=id,
+        hook_options=["He did NOT see that coming", "Wait for the crash", "5 stars, zero chance"],
         hook_text="He did NOT see that coming",
         title="Crash escape",
         caption="Cops had no chance 😂 would you have made it?",
@@ -96,7 +97,13 @@ def test_no_base_hashtags_means_claude_picks_all(monkeypatch, job):
 def test_fallback_uses_context_when_no_title(monkeypatch, job):
     job.title = None
     _fake_claude(monkeypatch, error=llm.LLMError("down"))
-    assert generate.run(job).clips[0].caption == "GTA 6 launch week, police chase fails"
+    assert generate.run(job).clips[0].title == "GTA 6 launch week, police chase fails"
+
+
+def test_fallback_hook_stops_before_a_bracket_in_the_title(monkeypatch, job):
+    job.title = "NEW GTA 6 GAMEPLAY (THESE LEAKS ARE INSANE!)"
+    _fake_claude(monkeypatch, error=llm.LLMError("down"))
+    assert generate.run(job).clips[0].hook_text == "NEW GTA 6 GAMEPLAY"
 
 
 def test_falls_back_when_claude_fails(monkeypatch, job):
@@ -104,9 +111,24 @@ def test_falls_back_when_claude_fails(monkeypatch, job):
     out = generate.run(job)
     assert out.status == JobStatus.captioned
     for c in out.clips:
-        assert c.caption == "GTA 6 - Insane Police Chase"
+        assert c.title == "GTA 6 - Insane Police Chase"
         assert c.hashtags == ["#gta6", "#gaming"]
         assert c.vibe == "hype" and c.suggested_sound
+    # each clip keeps a caption of its own: the ranker's reason for picking it
+    assert [c.caption for c in out.clips] == [
+        "Loud crash + streamer yells 'no way'",
+        "Helicopter escape, fast scene cuts",
+    ]
+
+
+def test_fallback_without_a_ranker_reason_numbers_the_clips(monkeypatch, job):
+    for c in job.clips:  # what the ranker leaves when Claude was down there too
+        c.score, c.reason = 0.0, "Picked by audio/video signals (loudness z 1.5)."
+    _fake_claude(monkeypatch, error=llm.LLMError("down"))
+    assert [c.caption for c in generate.run(job).clips] == [
+        "GTA 6 - Insane Police Chase (part 1 of 2)",
+        "GTA 6 - Insane Police Chase (part 2 of 2)",
+    ]
 
 
 def test_missing_clip_in_answer_gets_fallback(monkeypatch, job):
@@ -141,6 +163,28 @@ def test_clean_hook_limits_words_and_strips_hashtags():
     )
 
 
+def test_clean_hook_keeps_one_emoji_at_the_end():
+    assert generate.clean_hook("He \U0001f440 did NOT see that \U0001f602") == (
+        "He did NOT see that \U0001f440"
+    )
+    assert generate.clean_hook("one two three four five six seven \U0001f602") == (
+        "one two three four five six \U0001f602"
+    )
+    assert generate.clean_hook("\U0001f602") == ""
+
+
+def test_pick_hook_does_not_count_an_emoji_as_a_word():
+    long_with_emoji = "one two three four five six \U0001f602"
+    assert generate.pick_hook(long_with_emoji, ["short"]) == long_with_emoji
+
+
+def test_long_hook_is_replaced_by_an_option_that_fits(monkeypatch, job):
+    long = "He really did not see that one coming at all"
+    caps = [_cap("c01", hook_text=long, hook_options=[long, "Wait for the crash"]), _cap("c02")]
+    _fake_claude(monkeypatch, CaptionSet(clips=caps))
+    assert generate.run(job).clips[0].hook_text == "Wait for the crash"
+
+
 def test_clean_caption_trims_at_word_boundary():
     text = "word " * 60
     out = generate.clean_caption(text)
@@ -152,10 +196,11 @@ def test_clean_caption_removes_hashtags():
     assert generate.clean_caption("insane #gta6 escape") == "insane escape"
 
 
-def test_merge_hashtags_caps_extras():
-    out = generate.merge_hashtags(["#gta6"], [f"#t{i}" for i in range(10)] + ["", "#"])
-    assert out[0] == "#gta6"
-    assert len(out) == 1 + generate.EXTRA_HASHTAGS_MAX
+def test_merge_hashtags_caps_the_total():
+    # Instagram allows 5 hashtags per post; base tags count towards it
+    out = generate.merge_hashtags(["#gta6", "#gaming"], [f"#t{i}" for i in range(10)] + ["", "#"])
+    assert out == ["#gta6", "#gaming", "#t0", "#t1", "#t2"]
+    assert len(generate.merge_hashtags([f"#b{i}" for i in range(8)], ["#x"])) == 5
 
 
 # ---- sound picks

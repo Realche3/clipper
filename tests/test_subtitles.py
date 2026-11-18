@@ -39,12 +39,21 @@ def test_one_event_per_word_with_no_gaps_and_active_word_in_yellow():
 
 def test_hook_spans_first_three_seconds_top_style():
     events = dialogues(st.build_ass([], "  He did NOT   see that "))
-    assert events == ["Dialogue: 0,0:00:00.00,0:00:03.00,Hook,,0,0,0,,He did NOT see that"]
+    assert events == [
+        f"Dialogue: 0,0:00:00.00,0:00:03.00,Hook,,0,0,0,,{st.HOOK_IN}He did NOT see that"
+    ]
+
+
+def test_zero_length_word_gets_no_event():
+    # found on a real video: one zero-length event made libass drop the hook from the clip
+    blocks = [words((1.0, 1.5, "even"), (1.5, 2.0, "low."), (2.0, 2.0, "All"))]
+    events = dialogues(st.build_ass(blocks, None))
+    assert len(events) == 2 and all("0:00:02.00,0:00:02.00" not in e for e in events)
 
 
 def test_ass_override_characters_are_neutralised():
     blocks = [words((0.0, 1.0, "{\\b1}lol\\N"))]
-    assert dialogues(st.build_ass(blocks, "a {b} \\c"))[0].endswith(",a (b) /c")
+    assert dialogues(st.build_ass(blocks, "a {b} \\c"))[0].endswith(f",{st.HOOK_IN}a (b) /c")
     assert "(/b1)lol/N" in dialogues(st.build_ass(blocks, None))[0]
 
 

@@ -16,13 +16,22 @@ from clipper.render.subtitles import build_ass, group_words
 
 log = logging.getLogger(__name__)
 
-# The source, scaled to fill 9:16 and blurred, with the full-width source centred on top.
-BLUR_LAYOUT = (
-    "[0:v]split[a][b];"
-    "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bg];"
-    "[b]scale=1080:-2[fg];"
-    "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
-)
+
+def blur_layout(zoom: float) -> str:
+    """The source, scaled to fill 9:16 and blurred, with the source centred on top.
+
+    At zoom 1 the whole source width shows, which leaves a 16:9 video on a third of the
+    screen. A higher zoom enlarges it and crops the same amount off both sides.
+    """
+    width = max(round(1080 * zoom / 2) * 2, 1080)  # even, and never narrower than the frame
+    return (
+        "[0:v]split[a][b];"
+        "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bg];"
+        f"[b]scale={width}:-2,crop=1080:ih[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
+    )
+
+
 MIN_BYTES = 1024
 
 
@@ -34,7 +43,9 @@ def ffmpeg_args(
     source: Path, start: float, end: float, out_name: str, ass_name: str | None = None
 ) -> list[str]:
     # A relative .ass name: ffmpeg's subtitles= filter breaks on absolute Windows paths.
-    graph = BLUR_LAYOUT + (f",subtitles={ass_name}" if ass_name else "") + "[v]"
+    graph = (
+        blur_layout(config.FOREGROUND_ZOOM) + (f",subtitles={ass_name}" if ass_name else "") + "[v]"
+    )
     return [
         "ffmpeg", "-y", "-loglevel", "error",
         "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(source),

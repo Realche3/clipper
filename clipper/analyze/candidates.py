@@ -23,6 +23,7 @@ class Candidate:
     peak: int
     score: float
     stats: dict[str, float] = field(default_factory=dict)
+    source: str = "signals"  # or "transcript": proposed by Claude from what is said
 
 
 def pick_peaks(score: np.ndarray, k: int, min_gap: int = MIN_GAP) -> list[int]:
@@ -54,12 +55,40 @@ def make_window(
     [clip_min, clip_max] and the window kept inside the source."""
     start = _snap(peak - PRE_ROLL, points)
     end = _snap(peak + POST_ROLL, points)
+    return fit_window(start, end, duration, clip_min, clip_max)
+
+
+def fit_window(
+    start: float, end: float, duration: float, clip_min: float, clip_max: float
+) -> tuple[float, float]:
+    """Length kept in [clip_min, clip_max] and the window kept inside the source."""
     end = min(max(end, start + clip_min), start + clip_max)
     if end > duration:  # shift back rather than shorten
         start, end = start - (end - duration), duration
     if start < 0:
         start, end = 0.0, min(end - start, duration)
     return round(start, 2), round(end, 2)
+
+
+def _stats(
+    start: float,
+    end: float,
+    peak: int,
+    loud_z: np.ndarray,
+    cuts: list[float],
+    transcript: Transcript,
+    replay: np.ndarray | None,
+) -> dict[str, float]:
+    """What the ranker shows Claude about a window. `replay` only if YouTube has a graph."""
+    words = len(transcript.words_between(start, end))
+    stats = {
+        "loud_z": round(float(loud_z[peak]), 2),
+        "cuts": sum(start <= c < end for c in cuts),
+        "words_per_s": round(words / max(end - start, 1e-6), 2),
+    }
+    if replay is not None and replay.any():
+        stats["replay"] = round(float(replay[int(start) : int(np.ceil(end))].max()), 2)
+    return stats
 
 
 def find_candidates(
@@ -71,17 +100,31 @@ def find_candidates(
     k: int,
     clip_min: float,
     clip_max: float,
+    replay: np.ndarray | None = None,
 ) -> list[Candidate]:
     """The best k windows, best first, with the stats the ranker shows Claude."""
     points = pauses(transcript)
     out = []
     for peak in pick_peaks(score, k):
         start, end = make_window(peak, points, duration, clip_min, clip_max)
-        words = len(transcript.words_between(start, end))
-        stats = {
-            "loud_z": round(float(loud_z[peak]), 2),
-            "cuts": sum(start <= c < end for c in cuts),
-            "words_per_s": round(words / max(end - start, 1e-6), 2),
-        }
+        stats = _stats(start, end, peak, loud_z, cuts, transcript, replay)
         out.append(Candidate(start, end, peak, round(float(score[peak]), 3), stats))
+    return out
+
+
+def candidates_for(
+    windows: list[tuple[float, float]],
+    score: np.ndarray,
+    loud_z: np.ndarray,
+    cuts: list[float],
+    transcript: Transcript,
+    replay: np.ndarray | None = None,
+) -> list[Candidate]:
+    """Candidates for windows proposed from the transcript. The peak is the window's best second."""
+    out = []
+    for start, end in windows:
+        first = min(int(start), len(score) - 1)
+        peak = first + int(np.argmax(score[first : max(int(np.ceil(end)), first + 1)]))
+        stats = _stats(start, end, peak, loud_z, cuts, transcript, replay)
+        out.append(Candidate(start, end, peak, round(float(score[peak]), 3), stats, "transcript"))
     return out

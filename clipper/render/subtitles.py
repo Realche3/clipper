@@ -12,6 +12,9 @@ MAX_WORDS = 4
 MAX_GAP = 0.8  # a longer pause between words starts a new line
 HOOK_SECONDS = 3.0
 YELLOW = "&H00FFFF&"  # ASS colours are BGR
+# The hook is black on a white box (BorderStyle 3 in the style below) so it can't be mistaken
+# for a subtitle. It pops in from 70% size and fades out.
+HOOK_IN = r"{\fad(0,200)\fscx70\fscy70\t(0,160,\fscx100\fscy100)}"
 
 HEADER = """\
 [Script Info]
@@ -25,9 +28,9 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, \
 Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial,80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,\
--1,0,0,0,100,100,0,0,1,6,0,2,60,60,500,1
-Style: Hook,Arial,96,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,\
--1,0,0,0,100,100,0,0,1,8,0,8,60,60,300,1
+-1,0,0,0,100,100,0,0,1,6,0,2,60,60,440,1
+Style: Hook,Arial,84,&H00000000,&H00000000,&H00FFFFFF,&H00000000,\
+-1,0,0,0,100,100,0,0,3,16,0,8,70,70,300,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -59,11 +62,13 @@ def build_ass(blocks: list[list[Word]], hook_text: str | None) -> str:
     """The whole .ass file, or "" when there is nothing to show."""
     events = []
     if hook_text and hook_text.strip():
-        events.append(_event(0, HOOK_SECONDS, "Hook", _clean(hook_text)))
+        events.append(_event(0, HOOK_SECONDS, "Hook", HOOK_IN + _clean(hook_text)))
     for block in blocks:
         texts = [_clean(w.text) for w in block]
         for i, w in enumerate(block):
             end = block[i + 1].start if i + 1 < len(block) else w.end  # no gaps inside a line
+            if _ts(end) == _ts(w.start):
+                continue  # one zero-length event makes libass drop the hook from the whole clip
             line = " ".join(
                 f"{{\\c{YELLOW}}}{t}{{\\r}}" if j == i else t for j, t in enumerate(texts)
             )

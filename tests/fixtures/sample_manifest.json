@@ -11,6 +11,7 @@
   "duration": 620.0,
   "source_file": "workspace/jobs/sample01/source.mp4",
   "audio_file": "workspace/jobs/sample01/audio.wav",
+  "heatmap": [],
   "transcript_file": "tests/fixtures/sample_transcript.json",
   "clips": [
     {

@@ -83,30 +83,32 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 
 ### 5.1 ingest (Dev A)
 - Input: a YouTube URL. Uses `yt-dlp -f "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]"` and merges to `source.mp4`. H.264 comes first because plain `ext=mp4` can be AV1, which decodes slowly on laptops.
-- Writes to the manifest: `title`, `description`, `channel`, `credit`, `duration`, `source_file`. Rejects sources longer than `MAX_SOURCE_MINUTES`.
+- Writes to the manifest: `title`, `description`, `channel`, `credit`, `duration`, `source_file`, and `heatmap` (YouTube's "most replayed" graph from yt-dlp; empty when the video has none, which is most videos without many views). Rejects sources longer than `MAX_SOURCE_MINUTES`.
 - Also extracts `audio.wav` (16 kHz mono) once. Transcription and the loudness analysis both reuse it.
 
 ### 5.2 analyze (Dev A)
 1. **Transcript:** faster-whisper (`WHISPER_MODEL=small`, int8, CPU or CUDA, `vad_filter=True`, `word_timestamps=True`), saved to `transcript.json` (the `Transcript` model).
 2. **Signals, one value per second:**
-   - `loud`: momentary loudness from `audio.wav` (numpy RMS in dB), z-scored.
+   - `loud`: momentary loudness from `audio.wav` (numpy RMS in dB), z-scored around the median so silent stretches don't flatten the peaks.
    - `cuts`: scene-cut count in a 5s window (PySceneDetect `ContentDetector` on a 360p downscale).
    - `speech`: words per second plus a reaction-keyword hit list ("no way", "bro", "what", laughter, shouting) from the transcript.
-   - `score = 0.5*loud + 0.3*cuts + 0.2*speech`, smoothed with a 3s moving average.
-3. **Candidates:** take the top 15 peaks, at least 20s apart. Window = peak − 8s → peak + 20s, snapped to the nearest pause in the transcript, then clamped to `[CLIP_MIN, CLIP_MAX]`.
-4. **Claude ranker:** send the video title, each candidate's times, signal stats, and transcript snippet. It returns JSON for the best `CLIPS_PER_VIDEO` clips: refined `start`/`end` (inside the window), `score`, and `reason`. Validate it with pydantic. **Fallback:** if the LLM fails, take the top N by score.
+   - `replay`: the "most replayed" value (0–1) for that second, when the job has a `heatmap`. The first span is set to the median, because every viewer starts at 0:00.
+   - `score = 0.5*loud + 0.3*cuts + 0.2*speech`, smoothed with a 3s moving average. With a heatmap: `0.6*score + 0.4*replay`.
+3. **Candidates:** take the top 15 peaks, at least 20s apart. Window = peak − 8s → peak + 20s, snapped to the nearest pause in the transcript, then clamped to `[CLIP_MIN, CLIP_MAX]`. **Transcript moments:** unless speech is sparse, one more Claude call (`analyze/moments.py`, `CLAUDE_MODEL_MOMENTS`) reads the whole timestamped transcript and proposes up to `2 × CLIPS_PER_VIDEO` windows carried by what is said. They join the signal candidates. **Fallback:** if the LLM fails, signal candidates only.
+4. **Claude ranker:** send the video title, each candidate's times, where it was found (signals or transcript), signal stats (with `most replayed` when there is a heatmap), and its timestamped transcript. It returns JSON for the best `CLIPS_PER_VIDEO` clips: refined `start`/`end` (inside the window), `score`, and `reason`. Validate it with pydantic. **Fallback:** if the LLM fails, take the top N by score.
 5. Write `clips[]` to the manifest. Status becomes `analyzed`.
 
 ### 5.3 captions (Dev B)
 - One Claude call per job (all clips together, so the captions don't repeat each other). Inputs, most trusted first: the poster's `context` note given at submit time, the source title, channel and description, then each clip's reason and transcript snippet. **Nothing is hardcoded to GTA**, so Claude infers the niche from these inputs.
-- Output per clip: `hook_text` (≤ 6 words, shown on screen for the first 3s), `title`, `caption` (≤ 150 chars, no hashtags), and `hashtags` (3–5, niche-specific, plus the optional account-wide `BASE_HASHTAGS`).
+- Output per clip: `hook_text` (≤ 6 words, shown on screen for the first 3s), `title`, `caption` (≤ 150 chars, no hashtags), and `hashtags` (niche-specific, after the optional account-wide `BASE_HASHTAGS`; 5 in total at most, which is Instagram's per-post limit).
 - `suggested_sound`: Claude picks it by number from the trending list (§5.7), preferring different sounds for different clips. Fallback: a sound with the clip's `vibe`.
 - Status becomes `captioned`.
 
 ### 5.4 render (Dev A)
 - One ffmpeg call per clip: `-ss start -to end -i source.mp4`, re-encoded so the cut is frame-accurate.
 - Blur layout filter:
-  `[0:v]split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bg];[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`
+  `[0:v]split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2[bg];[b]scale=W:-2,crop=1080:ih[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`
+  where `W = 1080 × FOREGROUND_ZOOM` (default 1.3). At 1.0 a 16:9 source covers a third of the screen; at 1.3 it covers 41% and loses 11.5% of its width on each side.
 - Subtitles: build an `.ass` file from the word timestamps (2–4 words per line, current word highlighted, bold, centered in the lower third). The hook goes on the top third for 0–3s. Burn it with `subtitles=clip.ass`. **On Windows, run ffmpeg with `cwd` set to the clip folder and pass a relative `.ass` filename.** Absolute Windows paths break the filter.
 - Audio: `loudnorm=I=-14:TP=-1.5`. Output: `libx264 -preset veryfast -crf 20 -r 30 -pix_fmt yuv420p`, `aac 128k`, `-movflags +faststart`.
 - Supports `--clip <id>` so the dashboard can re-render one clip after an edit. Status becomes `rendered`, which means ready for review.
@@ -166,11 +168,11 @@ Rules:
 | D3 | Stages communicate only through `manifest.json` | Both devs can work in parallel against fixtures. Easy to debug, and stages can resume. | Shared DB for everything, in-memory pipeline |
 | D4 | SQLite only for the post queue | Needs uniqueness (no double queueing) and safe writes from dashboard reruns and CLI runs. | JSON queue (race conditions), Redis |
 | D5 | No job queue. The dashboard spawns `clipper run` as a subprocess, one job at a time. | Whisper and ffmpeg already max out the CPU, so parallel jobs don't help. | Celery, RQ, Redis |
-| D6 | Highlights = signal scoring, then Claude ranking | Gameplay often has little speech, so text-only LLM picking misses action. The signals keep LLM input small and cheap. | Transcript-only LLM (AutoClip style), vision on every frame (slow, expensive) |
+| D6 | Highlights = signal scoring plus transcript moments, then Claude ranking | Gameplay often has little speech, so text-only LLM picking misses action; signal peaks alone miss a story or joke told at normal volume. So both feed one ranker, and the transcript call is skipped when speech is sparse. YouTube's "most replayed" graph joins the score when a video has one, because it is what viewers actually rewatched. | Transcript-only LLM (AutoClip style), signals only, vision on every frame (slow, expensive) |
 | D7 | faster-whisper `small` int8 on CPU | About 4–8 min for 20 min of audio on a laptop. Works without a GPU. | OpenAI Whisper API (cost, upload time), YouTube auto-captions (bad timings). Kept as a fallback. |
 | D8 | ffmpeg via subprocess, ASS subtitles via libass | Fastest, full control, styled word highlighting | moviepy (slow), Remotion |
 | D9 | Captions before render | The hook text gets burned into the video. | Render twice |
-| D10 | Claude through `llm.ask_json` (structured output, 1 retry, server-side refusal fallback where the model supports it, then a non-LLM fallback). **Per-task models:** rank and captions use `claude-opus-5-5` (medium effort), sounds extraction uses `claude-haiku-5-5` (low effort). Every call is logged to `workspace/claude_usage.jsonl` (`clipper usage`). | Measured Nov 6: rank $0.038 + captions $0.036 per video on Opus; a sounds refresh is $0.02 on Haiku vs about $1 on Opus, with the same list quality. Sonnet halves the caption cost but wrote flatter hooks. Override with `CLAUDE_MODEL_RANK`, `CLAUDE_MODEL_CAPTIONS`, `CLAUDE_MODEL_SOUNDS`. | Local LLM (setup time, quality) |
+| D10 | Claude through `llm.ask_json` (structured output, 1 retry, server-side refusal fallback where the model supports it, then a non-LLM fallback). **Per-task models:** rank and captions use `claude-opus-5-5` (medium effort), sounds extraction uses `claude-haiku-5-5` (low effort). Every call is logged to `workspace/claude_usage.jsonl` (`clipper usage`). | Measured Nov 6: rank $0.038 + captions $0.036 per video on Opus; a sounds refresh is $0.02 on Haiku vs about $1 on Opus, with the same list quality. Sonnet halves the caption cost but wrote flatter hooks. Override with `CLAUDE_MODEL_RANK`, `CLAUDE_MODEL_MOMENTS`, `CLAUDE_MODEL_CAPTIONS`, `CLAUDE_MODEL_SOUNDS`. The transcript-moments call is not measured yet: its input is the whole transcript, so it grows with the video's length. | Local LLM (setup time, quality) |
 | D11 | Human review gate by default | One bad or offensive clip costs more than the minutes saved. | Full auto (available as `AUTO_APPROVE`) |
 | D12 | Original game audio by default. Trending sounds added in the TikTok app. | The APIs can't attach in-app sounds, and copyrighted audio gets muted or struck. | Burning songs into the file |
 | D13 | ~~TikTok inbox/draft upload~~, replaced by D18 | — | — |
@@ -190,7 +192,7 @@ clipper/
   llm.py           # SHARED Claude call -> pydantic model (Dev B writes on day 1)
   cli.py           # SHARED typer entry: run, stage, resume, ui, sounds refresh|list
   ingest/          # Dev A
-  analyze/         # Dev A: transcribe.py, signals.py, candidates.py, rank.py
+  analyze/         # Dev A: transcribe.py, signals.py, candidates.py, moments.py, rank.py
   render/          # Dev A: layout.py, subtitles.py (ASS), encode.py
   captions/        # Dev B: generate.py, sounds.py
   publish/         # Dev B: queue.py, slots.py, text.py

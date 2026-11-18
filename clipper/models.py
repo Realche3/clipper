@@ -83,6 +83,14 @@ class Clip(BaseModel):
         return self.end - self.start
 
 
+class HeatPoint(BaseModel):
+    """One span of YouTube's "most replayed" graph. value is 0..1, 1 = the most replayed."""
+
+    start: float
+    end: float
+    value: float
+
+
 class Job(BaseModel):
     id: str
     source_url: str  # YouTube URL or local file path
@@ -98,6 +106,7 @@ class Job(BaseModel):
     duration: float | None = None
     source_file: Path | None = None
     audio_file: Path | None = None  # 16kHz mono wav
+    heatmap: list[HeatPoint] = Field(default_factory=list)  # empty if YouTube shows no graph
     # analyze
     transcript_file: Path | None = None
     clips: list[Clip] = Field(default_factory=list)

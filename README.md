@@ -93,7 +93,7 @@ You can leave everything at its default. These are the ones worth knowing:
 | `POST_INTERVAL_MINUTES` | Minimum gap between two posts on one platform | `90` |
 | `DAILY_CAP_TIKTOK` / `DAILY_CAP_INSTAGRAM` | Max posts per day | `6` / `5` |
 | `WHISPER_MODEL` | Speech model. Use `base` if processing is too slow. | `small` |
-| `CLAUDE_MODEL_RANK` / `_CAPTIONS` / `_SOUNDS` | Which Claude model does each job | Opus / Opus / Haiku |
+| `CLAUDE_MODEL_RANK` / `_MOMENTS` / `_CAPTIONS` / `_SOUNDS` | Which Claude model does each job | Opus / Opus / Opus / Haiku |
 
 Restart `uv run clipper ui` after changing `.env`.
 

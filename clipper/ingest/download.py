@@ -15,7 +15,7 @@ from yt_dlp.utils import DownloadError
 
 from clipper import config
 from clipper.ingest.media import extract_audio, probe_duration
-from clipper.models import Job, JobStatus
+from clipper.models import HeatPoint, Job, JobStatus
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def _fetch(url: str, job_dir: Path, *, cookies: bool, overwrite: bool) -> dict[s
         return ydl.process_ie_result(info, download=True)
 
 
-def metadata(info: dict[str, Any]) -> dict[str, str | None]:
+def metadata(info: dict[str, Any]) -> dict[str, Any]:
     channel = info.get("channel") or info.get("uploader")
     handle = (info.get("uploader_id") or "").lstrip("@")
     return {
@@ -114,6 +114,11 @@ def metadata(info: dict[str, Any]) -> dict[str, str | None]:
         "description": info.get("description"),
         "channel": channel,
         "credit": f"@{handle}" if handle else channel,
+        # YouTube's "most replayed" graph; only videos with enough views have one
+        "heatmap": [
+            HeatPoint(start=h["start_time"], end=h["end_time"], value=h["value"])
+            for h in info.get("heatmap") or []
+        ],
     }
 
 

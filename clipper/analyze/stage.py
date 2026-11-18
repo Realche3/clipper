@@ -10,8 +10,8 @@ import os
 from pathlib import Path
 
 from clipper import config
-from clipper.analyze import signals
-from clipper.analyze.candidates import Candidate, find_candidates
+from clipper.analyze import moments, signals
+from clipper.analyze.candidates import Candidate, candidates_for, find_candidates
 from clipper.analyze.rank import rank
 from clipper.analyze.transcribe import transcribe
 from clipper.models import Job, JobStatus, Transcript
@@ -42,7 +42,14 @@ def run(job: Job, force: bool = False) -> Job:
         transcript = Transcript.model_validate_json(path.read_text(encoding="utf-8"))
         candidates = _candidates(job, transcript)
         for c in candidates:
-            log.info("candidate %.1f-%.1fs score=%.2f %s", c.start, c.end, c.score, c.stats)
+            log.info(
+                "candidate %.1f-%.1fs score=%.2f %s (%s)",
+                c.start,
+                c.end,
+                c.score,
+                c.stats,
+                c.source,
+            )
         job.clips = rank(
             job,
             candidates,
@@ -60,16 +67,18 @@ def _candidates(job: Job, transcript: Transcript) -> list[Candidate]:
     loud = signals.loudness_per_second(samples, sr)
     n = len(loud)
     cuts = signals.detect_cuts(Path(job.source_file))
+    replay = signals.replay_per_second(job.heatmap, n)
     score = signals.combine(
-        loud, signals.cut_density(cuts, n), signals.speech_per_second(transcript, n)
+        loud, signals.cut_density(cuts, n), signals.speech_per_second(transcript, n), replay
     )
-    return find_candidates(
-        score,
-        signals.zscore(loud),
-        cuts,
-        transcript,
-        duration=job.duration or n,
-        k=config.CANDIDATES,
-        clip_min=config.CLIP_MIN_SECONDS,
-        clip_max=config.CLIP_MAX_SECONDS,
+    loud_z = signals.robust_z(loud)
+    duration = job.duration or n
+    limits = (config.CLIP_MIN_SECONDS, config.CLIP_MAX_SECONDS)
+    found = find_candidates(
+        score, loud_z, cuts, transcript, duration, config.CANDIDATES, *limits, replay
     )
+    if not signals.speech_is_sparse(transcript, duration):
+        # what is said can carry a moment that the signals don't see
+        windows = moments.propose(job, transcript, duration, config.CLIPS_PER_VIDEO * 2, *limits)
+        found += candidates_for(windows, score, loud_z, cuts, transcript, replay)
+    return found

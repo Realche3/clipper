@@ -6,7 +6,7 @@ import pytest
 
 from clipper.analyze import candidates as cand
 from clipper.analyze import signals as sig
-from clipper.models import Segment, Transcript, Word
+from clipper.models import HeatPoint, Segment, Transcript, Word
 
 
 def transcript(*words: tuple[float, float, str]) -> Transcript:
@@ -39,6 +39,17 @@ def test_flat_signals_give_no_nans():
     score = sig.combine(flat, np.zeros(100), np.zeros(100))
     assert not np.isnan(score).any() and not score.any()
     assert len(sig.zscore(np.array([]))) == 0
+
+
+def test_silent_stretches_do_not_flatten_loudness_peaks():
+    rng = np.random.default_rng(0)
+    loud = -30 + rng.normal(0, 3, 600)
+    loud[300] = -10  # the moment
+    with_silence = loud.copy()
+    with_silence[:60] = -100  # a silent intro (digital silence floor)
+    assert sig.robust_z(with_silence)[300] == pytest.approx(sig.robust_z(loud)[300], rel=0.15)
+    assert sig.robust_z(with_silence).min() == -3  # silence is capped, not an outlier
+    assert sig.combine(with_silence, np.zeros(600), np.zeros(600)).argmax() in (299, 300, 301)
 
 
 def test_cut_density_counts_a_centred_window():
@@ -126,3 +137,57 @@ def test_find_candidates_have_stats():
     first = out[0]
     assert (first.start, first.end) == (52, 80)
     assert first.stats == {"loud_z": 0.6, "cuts": 2, "words_per_s": round(10 / 28, 2)}
+
+
+# ---------------------------------------------------------------- most replayed
+
+
+def heat(*values: float, span: float = 10.0) -> list[HeatPoint]:
+    return [HeatPoint(start=i * span, end=(i + 1) * span, value=v) for i, v in enumerate(values)]
+
+
+def test_replay_per_second_ignores_the_always_high_first_span():
+    replay = sig.replay_per_second(heat(1.0, 0.2, 0.9, 0.2), n=35)
+    assert replay[5] == pytest.approx(0.55)  # first span -> the median, not 1.0
+    assert replay[15] == 0.2 and replay[25] == 0.9 and replay[34] == 0.2
+    assert not sig.replay_per_second([], n=35).any()
+
+
+def test_most_replayed_moves_the_peak():
+    n = 300
+    loud = np.full(n, -30.0)
+    loud[50] = -10
+    quiet = np.zeros(n)
+    assert sig.combine(loud, quiet, quiet).argmax() in (49, 50, 51)
+    replay = sig.replay_per_second(heat(*([0.1] * 20), 1.0, *([0.1] * 9)), n)  # 200-210 s
+    assert 199 <= sig.combine(loud, quiet, quiet, replay).argmax() <= 210
+    # no graph: the score is unchanged
+    plain = sig.combine(loud, quiet, quiet)
+    assert np.array_equal(sig.combine(loud, quiet, quiet, np.zeros(n)), plain)
+
+
+def test_candidate_stats_include_replay_when_there_is_a_graph():
+    n = 300
+    score = np.zeros(n)
+    score[60] = 2.0
+    replay = np.zeros(n)
+    replay[70:75] = 0.8
+    t = transcript((55.0, 55.4, "go"))
+    out = cand.find_candidates(score, np.zeros(n), [], t, n, 1, 15, 60, replay)
+    assert out[0].stats["replay"] == 0.8 and out[0].source == "signals"
+
+
+def test_candidates_for_transcript_windows():
+    n = 300
+    score = np.zeros(n)
+    score[130] = 1.5
+    t = transcript((120.0, 120.4, "so"), (121.0, 121.4, "then"))
+    (c,) = cand.candidates_for([(120.0, 150.0)], score, np.arange(n) / 100, [125.0], t)
+    assert (c.start, c.end, c.peak, c.score, c.source) == (120.0, 150.0, 130, 1.5, "transcript")
+    assert c.stats == {"loud_z": 1.3, "cuts": 1, "words_per_s": round(2 / 30, 2)}
+
+
+def test_fit_window_keeps_length_and_source_bounds():
+    assert cand.fit_window(100, 104, 600, 15, 60) == (100, 115)
+    assert cand.fit_window(100, 300, 600, 15, 60) == (100, 160)
+    assert cand.fit_window(590, 598, 600, 15, 60) == (585, 600)

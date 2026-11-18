@@ -99,6 +99,15 @@ def test_subtitles_and_hook_are_burned_from_a_relative_ass(job, tmp_path):
     assert probe(job.clip("c01").file)["format"]["duration"]
 
 
+def test_zoom_enlarges_the_source_and_crops_its_sides(monkeypatch, tmp_path):
+    assert "[b]scale=1404:-2,crop=1080:" in encode.blur_layout(1.3)
+    assert "[b]scale=1080:-2,crop=1080:" in encode.blur_layout(1.0)
+    assert "[b]scale=1080:-2," in encode.blur_layout(0.5)  # never narrower than the frame
+    monkeypatch.setattr(config, "FOREGROUND_ZOOM", 2.0)
+    args = encode.ffmpeg_args(tmp_path / "s.mp4", 0, 5, "o.mp4")
+    assert "[b]scale=2160:-2," in args[args.index("-filter_complex") + 1]
+
+
 def test_ffmpeg_args_add_subtitles_only_when_given(tmp_path):
     plain = encode.ffmpeg_args(tmp_path / "s.mp4", 0, 5, "o.mp4")
     subbed = encode.ffmpeg_args(tmp_path / "s.mp4", 0, 5, "o.mp4", "c01.ass")

@@ -130,3 +130,10 @@ def test_bot_check_gives_actionable_error(fake_ydl, monkeypatch):
 
 def test_credit_falls_back_to_channel():
     assert download.metadata({"channel": "Some Channel"})["credit"] == "Some Channel"
+
+
+def test_metadata_keeps_the_most_replayed_graph():
+    info = {"heatmap": [{"start_time": 0.0, "end_time": 6.2, "value": 1.0}]}
+    (point,) = download.metadata(info)["heatmap"]
+    assert (point.start, point.end, point.value) == (0.0, 6.2, 1.0)
+    assert download.metadata({"heatmap": None})["heatmap"] == []  # most videos have none
