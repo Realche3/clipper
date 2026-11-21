@@ -46,8 +46,8 @@ class CaptionSet(BaseModel):
 
 
 SYSTEM = """\
-You write short-form social copy for an account that posts video clips to TikTok and \
-Instagram Reels. Viewers scroll fast; you get about one second to make them stop.
+You write short-form social copy for an account that posts video clips to TikTok, \
+Instagram Reels and YouTube Shorts. Viewers scroll fast; you get about one second to make them stop.
 
 Work out what the video is about (game, topic, people, event) from what you are given, \
 in this order of trust: the poster's note, then the source title and description, then \
@@ -62,7 +62,9 @@ without giving it away, or name the stakes, or call out who this is for. It must
 to the clip, because a hook the clip does not pay off makes viewers leave. Use concrete \
 words from the moment, not filler like "wait for it" or "you won't believe this".
 - hook_text: the strongest of your three options, copied exactly.
-- title: a short internal title (under 60 characters) describing the moment.
+- title: the YouTube Shorts title, under 70 characters. Say what happens in the words \
+people search for, with the game or topic name early. It may end with one emoji. No \
+hashtags. Different wording from the hook, and never a promise the clip does not keep.
 - caption: the post caption, at most 150 characters, written like a real fan of this \
 niche posts. Name the game or topic in plain words, the way someone would search for it. \
 Give viewers a reason to comment or to send it to a friend: a question with more than one \
@@ -190,7 +192,7 @@ def _ask_claude(
 
 def _apply_caption(clip: Clip, cap: ClipCaption) -> None:
     clip.hook_text = clean_hook(pick_hook(cap.hook_text, cap.hook_options))
-    clip.title = cap.title.strip()
+    clip.title = clean_title(cap.title) or None
     clip.caption = clean_caption(cap.caption)
     clip.hashtags = merge_hashtags(config.BASE_HASHTAGS, cap.hashtags)
     clip.vibe = cap.vibe
@@ -201,7 +203,7 @@ def _apply_fallback(clip: Clip, job: Job, number: int) -> None:
     title = (job.title or job.context or "Watch till the end").strip()
     # the title up to its first bracket or bar, so six words don't end inside "(THESE LEAKS"
     clip.hook_text = clean_hook(re.split(r"[(\[|]", title)[0].strip() or title)
-    clip.title = title
+    clip.title = clean_title(title)
     if clip.score > 0 and clip.reason:  # Claude's ranker said what happens in this clip
         clip.caption = clean_caption(clip.reason)
     else:
@@ -234,14 +236,27 @@ def clean_hook(text: str) -> str:
     return " ".join(words + ([emoji.group()] if emoji and words else []))
 
 
-def clean_caption(text: str) -> str:
-    text = " ".join(re.sub(r"#\w+", "", text).split())  # no hashtags, single spaces
-    if len(text) <= CAPTION_MAX_CHARS:
+TITLE_MAX_CHARS = 100  # YouTube's limit
+
+
+def clean_title(text: str) -> str:
+    """No hashtags or < > (YouTube rejects them), single spaces, at most 100 characters."""
+    text = " ".join(re.sub(r"#\w+|[<>]", "", text).split())
+    return _cut(text, TITLE_MAX_CHARS)
+
+
+def _cut(text: str, limit: int) -> str:
+    if len(text) <= limit:
         return text
-    cut = text[: CAPTION_MAX_CHARS - 1]
+    cut = text[: limit - 1]
     if " " in cut:
         cut = cut[: cut.rfind(" ")]
     return cut.rstrip(" ,.;:-") + "…"
+
+
+def clean_caption(text: str) -> str:
+    text = " ".join(re.sub(r"#\w+", "", text).split())  # no hashtags, single spaces
+    return _cut(text, CAPTION_MAX_CHARS)
 
 
 def normalize_hashtag(tag: str) -> str | None:

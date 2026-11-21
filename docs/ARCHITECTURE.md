@@ -8,13 +8,13 @@ Dates: today is Nov 4, 2026, **GTA 6 launches Nov 19**, and code freezes Nov 17.
 
 ## 1. Goal and success criteria
 
-Turn one long gaming video into **5 ready-to-post vertical clips in under 15 minutes** on a normal laptop. Then get them onto TikTok and Instagram Reels with as little manual work as the platforms allow.
+Turn one long gaming video into **5 ready-to-post vertical clips in under 15 minutes** on a normal laptop. Then get them onto TikTok, Instagram Reels and YouTube Shorts with as little manual work as the platforms allow.
 
 The MVP is done when all of these hold:
 1. Paste a YouTube URL and get 5 clips: 1080x1920, 15–60s, burned-in subtitles, and a hook line on screen.
 2. Every clip has a title, a caption, and hashtags.
 3. A human approves or rejects clips in a dashboard and can tweak the caption, hook, or trim.
-4. Approved clips get a suggested posting time and a **post kit**: one click copies the caption, shows the file and opens the TikTok or Instagram upload page. A human finishes the post (D18).
+4. Approved clips get a suggested posting time and a **post kit**: one click copies the caption, shows the file and opens the TikTok, Instagram or YouTube upload page. A human finishes the post (D18).
 5. A clip is never queued twice on the same platform, and the dashboard shows what's been posted.
 
 ## 2. Scope
@@ -34,7 +34,7 @@ The MVP is done when all of these hold:
 ### Stretch (only after the MVP works end to end)
 - Facecam layout (manual crop preset per channel)
 - Royalty-free music mix (`MUSIC_MODE=library`)
-- YouTube Shorts upload
+- YouTube Shorts auto-upload through the YouTube Data API (`videos.insert`). Needs a Google Cloud project, OAuth, and Google's API audit: until it passes, uploads from the app are locked to private. Manual YouTube posting is already in the post kit (D20).
 - **Auto-posting** through the Upload-Post API. It needs a posting loop again: the scheduler (claim, retries, `needs_check`, DryRun client) was built in PR #6 and removed in Phase 1, so restore it from git history instead of rewriting it.
 - Phone share-sheet button (Web Share API) to send a clip straight into the TikTok or Instagram editor. Needs the dashboard on HTTPS, e.g. via a tunnel.
 - Claude vision ranking (send frames from each candidate)
@@ -100,7 +100,7 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 
 ### 5.3 captions (Dev B)
 - One Claude call per job (all clips together, so the captions don't repeat each other). Inputs, most trusted first: the poster's `context` note given at submit time, the source title, channel and description, then each clip's reason and transcript snippet. **Nothing is hardcoded to GTA**, so Claude infers the niche from these inputs.
-- Output per clip: `hook_text` (≤ 6 words, shown on screen for the first 3s), `title`, `caption` (≤ 150 chars, no hashtags), and `hashtags` (niche-specific, after the optional account-wide `BASE_HASHTAGS`; 5 in total at most, which is Instagram's per-post limit).
+- Output per clip: `hook_text` (≤ 6 words, shown on screen for the first 3s), `title` (the YouTube Shorts title: searchable, ≤ 100 chars, no hashtags or `< >`; also the clip's label in the dashboard), `caption` (≤ 150 chars, no hashtags), and `hashtags` (niche-specific, after the optional account-wide `BASE_HASHTAGS`; 5 in total at most, which is Instagram's per-post limit).
 - `suggested_sound`: Claude picks it by number from the trending list (§5.7), preferring different sounds for different clips. Fallback: a sound with the clip's `vibe`.
 - Status becomes `captioned`.
 
@@ -121,7 +121,7 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 ### 5.6 posting: queue + post kit (Dev B)
 
 > **Phase 1 is manual posting (D18).** Approving a clip still books a slot per platform, but the slot is a *reminder*. The Queue page lists posts that are **due now**, each with a post kit:
-> - **Start posting**: copies the platform-formatted text (`publish/text.py`) to the clipboard, reveals the clip file in Explorer/Finder, and opens the upload page (TikTok Studio upload / Instagram).
+> - **Start posting**: copies the platform-formatted text (`publish/text.py`) to the clipboard, reveals the clip file in Explorer/Finder, and opens the upload page (TikTok Studio upload / Instagram / YouTube Studio upload). YouTube asks for a title and a description separately, so for YouTube it copies the **title** and the kit has a second copy button for the description.
 > - The suggested sound, with a link that searches for it.
 > - Separate **Copy text / Show file / Open upload page** buttons, and **Post now** for a post that isn't due yet.
 > - **Mark as posted** (optional link): `scheduled` → `published`. **Undo** moves it back.
@@ -131,7 +131,7 @@ Stage order: **ingest → analyze → captions → render**. Captions runs befor
 - **Queue (`workspace/clipper.db`, table `posts`):** id, job_id, clip_id, platform, status, scheduled_at, attempts, remote_id, url, error, updated_at. UNIQUE(job_id, clip_id, platform), which is the double-post guard.
 - **Slotting:** the next free slot per platform, at least `POST_INTERVAL_MINUTES` after the previous one, inside `POSTING_WINDOW` (e.g. 10:00–23:30 local), under `DAILY_CAP_<PLATFORM>`. Otherwise it moves to the next day.
 - **Statuses:** only `scheduled` and `published` are used in Phase 1. The other `PostStatus` values stay in `models.py` for a future auto mode.
-- **Post text** (`publish/text.py`): Instagram is `caption + "\n\n" + hashtags + "\n🎥 " + credit`. TikTok is one line: caption, hashtags, credit.
+- **Post text** (`publish/text.py`): Instagram is `caption + "\n\n" + hashtags + "\n🎥 " + credit`. TikTok is one line: caption, hashtags, credit. YouTube's description is like Instagram's with `#shorts` added to the tags, and its title comes from `post_title` (the clip `title`, falling back to the hook, then the source title).
 - **Clipboard / file manager / browser** actions run on your own computer (the dashboard is localhost-only). The clipboard goes through `pyperclip`. Explorer `/select`, Finder `open -R`, or `xdg-open`.
 
 ### 5.7 trending sounds (Dev B)
@@ -182,6 +182,7 @@ Rules:
 | D17 | Folder ownership per dev, and the shared contract changes only by agreement | Prevents merge conflicts and silent breakage between two AI-assisted devs | — |
 | D18 | **Phase 1 posting is manual-assisted**: a post kit, no platform APIs, no scheduler | No app reviews or OAuth, it works for any account today, and it allows in-app trending sounds. About 1 min per post. | Own TikTok/Meta apps (days of review, TikTok private-only until audit), Upload-Post API ($24/mo, kept as auto mode later), browser automation (against platform terms) |
 | D19 | Trending sounds come from public weekly roundups, extracted by Claude | No official API exists. Roundups are plain HTML and cover both platforms. Claude copes with changing page layouts. | TikTok Creative Center scraping (signed session), paid scrapers (Apify), a hand-kept list only (too small) |
+| D20 | **YouTube Shorts is a third platform in the manual post kit** (`Platform.youtube`, `DAILY_CAP_YOUTUBE`, upload page `youtube.com/upload`). The clip `title` becomes the Shorts title. | Same flow as TikTok/IG, works today. Our clips (15–60s, 9:16) count as Shorts automatically. | YouTube Data API upload (private-only until Google's audit passes; kept as a stretch item) |
 
 ## 8. Module layout
 

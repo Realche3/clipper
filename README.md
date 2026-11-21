@@ -1,6 +1,6 @@
 # 🎬 Clipper
 
-Paste a YouTube link and get 5 vertical clips (9:16) for TikTok and Instagram Reels. Each clip comes with a hook on screen, subtitles, a caption, hashtags and a suggested trending sound. You review the clips in a dashboard and post them in about a minute each.
+Paste a YouTube link and get 5 vertical clips (9:16) for TikTok, Instagram Reels and YouTube Shorts. Each clip comes with a hook on screen, subtitles, a title, a caption, hashtags and a suggested trending sound. You review the clips in a dashboard and post them in about a minute each.
 
 Everything runs on your own computer. The only cost is the Claude API, about **$0.07 per video**.
 
@@ -55,9 +55,9 @@ Go to **🎵 Sounds** → **Refresh now** (about 15 seconds). This loads around 
 3. Click **🚀 Make clips**. A 10-minute video takes about 5 minutes. The first run also downloads the speech model, so it takes a bit longer.
 
 ### Review
-On **🎞️ Jobs**, each clip shows the video, its hook, caption, hashtags and suggested sound.
-- **✅ Approve** to schedule the clip for TikTok and Instagram, or **🚫 Reject** it.
-- You can edit the caption and hashtags right in the card.
+On **🎞️ Jobs**, each clip shows the video, its hook, YouTube title, caption, hashtags and suggested sound.
+- **✅ Approve** to schedule the clip for TikTok, Instagram and YouTube Shorts, or **🚫 Reject** it.
+- You can edit the YouTube title, caption and hashtags right in the card.
 - **📱** previews how the post will look. **🎵** swaps the sound. **📂** shows the file.
 - **✂️ Edit clip** changes the hook text or the start and end times. The clip re-renders in under a minute.
 - **⚡ Bulk** approves or rejects every clip of a video at once.
@@ -65,11 +65,15 @@ On **🎞️ Jobs**, each clip shows the video, its hook, caption, hashtags and 
 ### Post
 Approved clips get a suggested posting time, spread out through the day. When a post's time comes, it shows on **📤 Queue → Due now**:
 
-1. Click **🚀 Start posting**. That copies the caption, shows the clip file and opens the TikTok or Instagram upload page.
+1. Click **🚀 Start posting**. That copies the caption, shows the clip file and opens the upload page.
 2. Drag the file into the upload page.
 3. Add the suggested sound in the TikTok or Instagram editor.
 4. Paste the caption with Ctrl+V and post.
 5. Back in the dashboard, click **✅ Mark as posted**. You can paste the post link if you like. 🎈
+
+**YouTube Shorts** works the same way, but YouTube asks for a title and a description separately. **🚀 Start posting** copies the **title** and opens YouTube Studio's upload page. Paste the title, then click **📋 Description** and paste that too. YouTube only adds songs in its phone app, so the sound is optional there.
+
+Don't want one of the platforms? Set `ENABLED_PLATFORMS` in `.env`, for example `tiktok,youtube`.
 
 Want to post something early? Use **Up next → Post now**. Marked one by mistake? Use **Posted → Undo**.
 
@@ -91,7 +95,8 @@ You can leave everything at its default. These are the ones worth knowing:
 | `CLIP_MIN_SECONDS` / `CLIP_MAX_SECONDS` | Clip length | `15` / `60` |
 | `POSTING_WINDOW` | Hours when posts are scheduled | `10:00-23:30` |
 | `POST_INTERVAL_MINUTES` | Minimum gap between two posts on one platform | `90` |
-| `DAILY_CAP_TIKTOK` / `DAILY_CAP_INSTAGRAM` | Max posts per day | `6` / `5` |
+| `ENABLED_PLATFORMS` | Where approved clips get queued | `tiktok,instagram,youtube` |
+| `DAILY_CAP_TIKTOK` / `_INSTAGRAM` / `_YOUTUBE` | Max posts per day | `6` / `5` / `6` |
 | `WHISPER_MODEL` | Speech model. Use `base` if processing is too slow. | `small` |
 | `CLAUDE_MODEL_RANK` / `_MOMENTS` / `_CAPTIONS` / `_SOUNDS` | Which Claude model does each job | Opus / Opus / Opus / Haiku |
 

@@ -143,6 +143,7 @@ class Job(BaseModel):
 class Platform(StrEnum):
     tiktok = "tiktok"
     instagram = "instagram"
+    youtube = "youtube"  # Shorts
 
 
 class PostStatus(StrEnum):

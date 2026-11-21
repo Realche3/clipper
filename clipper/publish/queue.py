@@ -63,6 +63,7 @@ def daily_cap(platform: Platform) -> int:
     return {
         Platform.tiktok: config.DAILY_CAP_TIKTOK,
         Platform.instagram: config.DAILY_CAP_INSTAGRAM,
+        Platform.youtube: config.DAILY_CAP_YOUTUBE,
     }[platform]
 
 

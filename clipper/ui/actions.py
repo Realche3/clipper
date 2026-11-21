@@ -22,7 +22,7 @@ from clipper import config, llm
 from clipper.captions.generate import normalize_hashtag
 from clipper.models import Job, JobStatus, Platform, Post, PostStatus, ReviewStatus
 from clipper.publish import queue
-from clipper.publish.text import post_text
+from clipper.publish.text import post_text, post_title
 from clipper.sounds.fetch import SoundsError, refresh
 from clipper.sounds.store import Sound, all_sounds, load_fetched
 
@@ -156,12 +156,16 @@ def parse_hashtags(text: str) -> list[str]:
     return out
 
 
-def save_copy(job_id: str, clip_id: str, caption: str, hashtags: str) -> None:
-    """Save edited caption and hashtags. Queued posts pick up the new text when they go out."""
+def save_copy(
+    job_id: str, clip_id: str, caption: str, hashtags: str, title: str | None = None
+) -> None:
+    """Save edited caption, hashtags and (YouTube) title. Queued posts use the new text."""
     job = _editable(job_id)
     clip = job.clip(clip_id)
     clip.caption = caption.strip()
     clip.hashtags = parse_hashtags(hashtags)
+    if title is not None:
+        clip.title = " ".join(title.split()) or None
     job.save(config.WORKSPACE)
 
 
@@ -335,16 +339,35 @@ def load_clip(job_id: str, clip_id: str):
 # The dashboard runs on your own computer, so these act on this machine directly.
 
 
+def enabled_platforms() -> list[Platform]:
+    """ENABLED_PLATFORMS for display; a typo there shows up when approving, not here."""
+    try:
+        return queue.enabled_platforms()
+    except queue.EnqueueError:
+        return list(Platform)
+
+
 def upload_url(platform: Platform) -> str:
     return {
         Platform.tiktok: config.TIKTOK_UPLOAD_URL,
         Platform.instagram: config.INSTAGRAM_UPLOAD_URL,
+        Platform.youtube: config.YOUTUBE_UPLOAD_URL,
     }[platform]
 
 
 def copy_text(post_id: int) -> str:
     """Copy the platform-formatted caption + hashtags + credit to the clipboard."""
-    text = _post_text(post_id)
+    return _copy(_post_text(post_id))
+
+
+def copy_title(post_id: int) -> str:
+    """Copy the YouTube title (YouTube asks for a title and a description separately)."""
+    post = _get_post(post_id)
+    job, clip = load_clip(post.job_id, post.clip_id)
+    return _copy(post_title(job, clip))
+
+
+def _copy(text: str) -> str:
     try:
         pyperclip.copy(text)
     except pyperclip.PyperclipException as e:
@@ -382,9 +405,16 @@ def open_upload_page(post_id: int) -> str:
 
 
 def start_posting(post_id: int) -> None:
-    """One click: caption on the clipboard, file shown, upload page opened."""
+    """One click: caption on the clipboard, file shown, upload page opened.
+
+    YouTube asks for the title first, so for YouTube the title goes on the clipboard; the
+    description is one Copy click away in the post kit.
+    """
     _clip_file(post_id)  # fail early, before touching anything, if the file is gone
-    copy_text(post_id)
+    if _get_post(post_id).platform == Platform.youtube:
+        copy_title(post_id)
+    else:
+        copy_text(post_id)
     reveal_file(post_id)
     open_upload_page(post_id)
 
@@ -498,4 +528,8 @@ def claude_spend() -> tuple[float, float]:
     return llm.spend_since(today, rows), llm.spend_since(now - timedelta(days=7), rows)
 
 
-PLATFORM_LABEL = {Platform.tiktok: "TikTok", Platform.instagram: "Instagram"}
+PLATFORM_LABEL = {
+    Platform.tiktok: "TikTok",
+    Platform.instagram: "Instagram",
+    Platform.youtube: "YouTube Shorts",
+}

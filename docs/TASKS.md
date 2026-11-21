@@ -70,6 +70,7 @@ Each task's section in [ARCHITECTURE.md](ARCHITECTURE.md) has the full spec. ⛔
   - Approving calls `enqueue`. The queue view shows each post's status.
   - TikTok drafts get a **copy caption** button and the suggested sound.
 - [x] **B8 Dashboard v2:** editing the hook, start, or end runs `clipper stage render <job> --clip <id> --force`. Add views for errors, failed posts, and `needs_check`. Add a manual "mark as posted" button for TikTok drafts.
+- [x] **B9 YouTube Shorts in the post kit** (D20): `Platform.youtube`, Shorts title on every clip (editable in the card), Start posting copies the title, a second button copies the description, `DAILY_CAP_YOUTUBE`.
 
 ---
 

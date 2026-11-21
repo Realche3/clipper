@@ -90,8 +90,11 @@ TRENDING_SOURCES = [
 # Posting (manual post kit, ARCHITECTURE.md D18)
 TIKTOK_UPLOAD_URL = _get("TIKTOK_UPLOAD_URL") or "https://www.tiktok.com/tiktokstudio/upload"
 INSTAGRAM_UPLOAD_URL = _get("INSTAGRAM_UPLOAD_URL") or "https://www.instagram.com/"
-ENABLED_PLATFORMS = _get("ENABLED_PLATFORMS", "tiktok,instagram").split(",")
+# youtube.com/upload opens YouTube Studio's upload dialog on your own channel
+YOUTUBE_UPLOAD_URL = _get("YOUTUBE_UPLOAD_URL") or "https://www.youtube.com/upload"
+ENABLED_PLATFORMS = _get("ENABLED_PLATFORMS", "tiktok,instagram,youtube").split(",")
 POST_INTERVAL_MINUTES = int(_get("POST_INTERVAL_MINUTES", "90"))
 POSTING_WINDOW = _get("POSTING_WINDOW", "10:00-23:30")  # local time
 DAILY_CAP_TIKTOK = int(_get("DAILY_CAP_TIKTOK", "6"))
 DAILY_CAP_INSTAGRAM = int(_get("DAILY_CAP_INSTAGRAM", "5"))
+DAILY_CAP_YOUTUBE = int(_get("DAILY_CAP_YOUTUBE", "6"))

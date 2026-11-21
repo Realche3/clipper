@@ -5,7 +5,7 @@ Two people build this repo by vibe-coding with Claude Code. Read this whole file
 **Work is split into tasks in [docs/TASKS.md](docs/TASKS.md).** When asked to "do task X", follow that task's spec and its *Done when* line. Stay inside its folders and tick its checkbox in the same PR. Dev A is the friend (engine). Dev B is the repo owner (distribution).
 
 ## What we're building
-A tool that takes a YouTube link, cuts it into several vertical short clips (9:16, 15–60s), writes a caption and hashtags for each clip, suggests a trending sound, and makes posting them to TikTok and Instagram Reels nearly one click. It targets GTA 6 gaming content, and **the deadline is the GTA 6 launch (Nov 19, 2026)**. **Phase 1** = the two of us run it locally for our own accounts. **Phase 2** = a SaaS for other creators, after launch (ARCHITECTURE.md §13). Shipping beats polish. Only build what the pipeline needs.
+A tool that takes a YouTube link, cuts it into several vertical short clips (9:16, 15–60s), writes a caption and hashtags for each clip, suggests a trending sound, and makes posting them to TikTok, Instagram Reels and YouTube Shorts nearly one click. It targets GTA 6 gaming content, and **the deadline is the GTA 6 launch (Nov 19, 2026)**. **Phase 1** = the two of us run it locally for our own accounts. **Phase 2** = a SaaS for other creators, after launch (ARCHITECTURE.md §13). Shipping beats polish. Only build what the pipeline needs.
 
 ## Pipeline (each stage is a separate module)
 ```

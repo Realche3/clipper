@@ -13,14 +13,14 @@ from datetime import datetime, timedelta
 import streamlit as st
 
 from clipper.models import JobStatus, Platform, PostStatus, ReviewStatus
-from clipper.publish.text import post_text
+from clipper.publish.text import post_text, post_title
 from clipper.sounds.store import search_url
 from clipper.ui import actions
 
 st.set_page_config(page_title="Clipper", page_icon="🎬", layout="wide")
 
 PAGES = {"Home": "🏠", "New video": "✨", "Jobs": "🎞️", "Queue": "📤", "Sounds": "🎵"}
-PLATFORM_ICON = {Platform.tiktok: "🎵", Platform.instagram: "📸"}
+PLATFORM_ICON = {Platform.tiktok: "🎵", Platform.instagram: "📸", Platform.youtube: "▶️"}
 VIBE_ICON = {"hype": "🔥", "funny": "😂", "chill": "🌊", "dramatic": "🎭"}
 REVIEW_BADGE = {
     ReviewStatus.pending: ":orange-badge[⏳ To review]",
@@ -73,6 +73,9 @@ h1.clipper-title {
 .phone .cap {font-size: .95rem;}
 .phone .tag {color: #25F4EE; font-weight: 600;}
 .phone.instagram .tag {color: #C9A7FF;}
+.phone.youtube {background: linear-gradient(180deg, #2e1414 0%, #0d0d12 100%);}
+.phone.youtube .tag {color: #7FB2FF;}
+.phone .yt-title {font-weight: 700; font-size: 1rem; margin-bottom: .3rem;}
 .phone .credit {color: #9A9AA8; font-size: .85rem; margin-top: .2rem;}
 .phone .snd {margin-top: .6rem; font-size: .9rem; color: #F2F2F5; opacity: .9;}
 .phone .actions {margin-top: .6rem; letter-spacing: .4rem; opacity: .8;}
@@ -346,6 +349,11 @@ def clip_card(job_id: str, clip_id: str) -> None:
         st.markdown(f'<div class="hook">“{clip.hook_text or "—"}”</div>', unsafe_allow_html=True)
         st.caption(f"Why: {clip.reason}")
 
+        title = clip.title or ""
+        if Platform.youtube in actions.enabled_platforms():
+            title = st.text_input(
+                "▶️ YouTube title", title, key=f"title-{key}", max_chars=TITLE_LIMIT
+            )
         caption = st.text_area("Caption", clip.caption or "", key=f"cap-{key}", height=90)
         tags = st.text_input("Hashtags", " ".join(clip.hashtags), key=f"tags-{key}")
         st.markdown(counters(caption, tags))
@@ -356,7 +364,11 @@ def clip_card(job_id: str, clip_id: str) -> None:
         else:
             st.caption("🎵 No sound picked")
 
-        changed = caption != (clip.caption or "") or tags != " ".join(clip.hashtags)
+        changed = (
+            caption != (clip.caption or "")
+            or tags != " ".join(clip.hashtags)
+            or title != (clip.title or "")
+        )
         b1, b2 = st.columns(2)
         if b1.button(
             "✅ Approve",
@@ -366,7 +378,7 @@ def clip_card(job_id: str, clip_id: str) -> None:
             width="stretch",
         ):
             if changed:
-                actions.save_copy(job_id, clip_id, caption, tags)
+                actions.save_copy(job_id, clip_id, caption, tags, title)
             _do(actions.approve, job_id, clip_id, ok="Approved and scheduled")
         if b2.button(
             "🚫 Reject",
@@ -377,7 +389,7 @@ def clip_card(job_id: str, clip_id: str) -> None:
             _do(actions.reject, job_id, clip_id, ok="Rejected")
         b3, b4 = st.columns(2)
         if b3.button("💾 Save text", key=f"save-{key}", disabled=not changed, width="stretch"):
-            _do(actions.save_copy, job_id, clip_id, caption, tags, ok="Saved")
+            _do(actions.save_copy, job_id, clip_id, caption, tags, title, ok="Saved")
         with b4.popover("✂️ Edit clip", use_container_width=True):
             edit_form(job, clip, key, locked)
         b5, b6, b7 = st.columns(3)
@@ -399,6 +411,7 @@ def clip_card(job_id: str, clip_id: str) -> None:
 
 
 CAPTION_LIMIT = 150
+TITLE_LIMIT = 100  # YouTube's title limit
 
 
 def counters(caption: str, tags: str) -> str:
@@ -449,10 +462,15 @@ def phone_preview(job_id: str, clip_id: str) -> None:
         if clip.file and clip.file.exists():
             st.video(str(clip.file), autoplay=True, muted=True, loop=True)
     with side:
-        tabs = st.tabs([f"{PLATFORM_ICON[p]} {actions.PLATFORM_LABEL[p]}" for p in Platform])
-        for tab, platform in zip(tabs, Platform, strict=True):
+        platforms = actions.enabled_platforms() or list(Platform)
+        tabs = st.tabs([f"{PLATFORM_ICON[p]} {actions.PLATFORM_LABEL[p]}" for p in platforms])
+        for tab, platform in zip(tabs, platforms, strict=True):
             with tab:
                 st.markdown(phone_card(job, clip, platform), unsafe_allow_html=True)
+                if platform == Platform.youtube:
+                    st.caption("Title")
+                    st.code(post_title(job, clip), language=None, wrap_lines=True)
+                    st.caption("Description")
                 st.code(post_text(job, clip, platform), language=None, wrap_lines=True)
 
 
@@ -461,10 +479,16 @@ def phone_card(job, clip, platform: Platform) -> str:
     tags = " ".join(f"<span class='tag'>{html.escape(t)}</span>" for t in clip.hashtags)
     sound = html.escape(clip.suggested_sound or "original sound")
     credit = f"<div class='credit'>🎥 {html.escape(job.credit)}</div>" if job.credit else ""
-    name = "@you" if platform == Platform.tiktok else "you"
+    name = "you" if platform == Platform.instagram else "@you"
+    yt_title = (
+        f"<div class='yt-title'>{html.escape(post_title(job, clip))}</div>"
+        if platform == Platform.youtube
+        else ""
+    )
     return f"""
 <div class="phone {platform.value}">
   <div class="hookline">“{html.escape(clip.hook_text or "")}”</div>
+  {yt_title}
   <div class="who">{name}</div>
   <div class="cap">{caption} {tags}</div>
   {credit}
@@ -586,6 +610,7 @@ def queue_view() -> None:
 def post_kit(p) -> None:
     job, clip = actions.load_clip(p.job_id, p.clip_id)
     platform = actions.PLATFORM_LABEL[p.platform]
+    youtube = p.platform == Platform.youtube
     with st.container(border=True):
         video, info = st.columns([1, 2])
         with video:
@@ -602,19 +627,42 @@ def post_kit(p) -> None:
                 type="primary",
                 width="stretch",
             ):
-                _do(actions.start_posting, p.id, ok="Caption copied · file shown · page opened")
+                copied = "Title" if youtube else "Caption"
+                _do(actions.start_posting, p.id, ok=f"{copied} copied · file shown · page opened")
+            if youtube:
+                st.caption(
+                    "YouTube asks for a **title** and a **description**. Start posting copies "
+                    "the title; paste it, then copy the description below."
+                )
+                st.caption("Title")
+                st.code(post_title(job, clip), language=None, wrap_lines=True)
+                st.caption("Description")
             st.code(post_text(job, clip, p.platform), language=None, wrap_lines=True)
-            if clip.suggested_sound:
+            if clip.suggested_sound and youtube:
+                st.caption(
+                    f"🎵 Optional: YouTube only adds sounds in its phone app. "
+                    f"Suggested: {clip.suggested_sound}"
+                )
+            elif clip.suggested_sound:
                 st.markdown(
                     f"🎵 Add this sound in the editor: **{clip.suggested_sound}** · "
                     f"[find it on TikTok]({search_url(clip.suggested_sound)})"
                 )
-            b1, b2, b3 = st.columns(3)
-            if b1.button("📋 Copy text", key=f"copy-{p.id}", width="stretch"):
+            if youtube:
+                b0, b1, b2, b3 = st.columns(4)
+                if b0.button(
+                    "📋 Title", key=f"copy-title-{p.id}", width="stretch", help="Copy the title"
+                ):
+                    _do(actions.copy_title, p.id, ok="Title copied", rerun=False)
+                copy_label, open_label = "📋 Description", "↗ YouTube"
+            else:
+                b1, b2, b3 = st.columns(3)
+                copy_label, open_label = "📋 Copy text", f"↗ Open {platform}"
+            if b1.button(copy_label, key=f"copy-{p.id}", width="stretch"):
                 _do(actions.copy_text, p.id, ok="Copied", rerun=False)
             if b2.button("📂 Show file", key=f"file-{p.id}", width="stretch"):
                 _do(actions.reveal_file, p.id, ok="File shown", rerun=False)
-            if b3.button(f"↗ Open {platform}", key=f"page-{p.id}", width="stretch"):
+            if b3.button(open_label, key=f"page-{p.id}", width="stretch"):
                 _do(actions.open_upload_page, p.id, ok="Upload page opened", rerun=False)
 
             url_col, done_col = st.columns([3, 2], vertical_alignment="bottom")
